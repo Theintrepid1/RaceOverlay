@@ -10,7 +10,7 @@ the oldest distro you want to support (this was set up on Ubuntu 24.04).
 |---|---|---|
 | App + Python + Qt | PyInstaller (onedir) | Unused Qt plugins/libs pruned |
 | ffmpeg, ffprobe | BtbN `ffmpeg-n8.1-latest-linux64-gpl-shared-8.1` | Loads the host's `libva.so.2` at runtime, so VAAPI uses the host's drivers |
-| libmpv 0.41 | Built from source against those ffmpeg libs | OpenGL render API, X11/Wayland, VAAPI + EGL dmabuf interop, Pulse/ALSA |
+| libmpv 0.41 | Built from source against those ffmpeg libs | OpenGL render API, X11/Wayland, VAAPI + EGL dmabuf interop, NVDEC + CUDA/GL interop, Pulse/ALSA |
 | libplacebo 7.360.1 | Built static into libmpv | OpenGL only |
 
 Host-provided (never bundled, per the AppImage excludelist): glibc, libstdc++,
@@ -26,7 +26,7 @@ sudo apt install meson ninja-build pkg-config nasm patchelf libass-dev \
   libx11-dev libxext-dev libxrandr-dev libxss-dev libxpresent-dev \
   libxkbcommon-dev libwayland-dev wayland-protocols libegl-dev libgl-dev \
   libva-dev libdrm-dev libdisplay-info-dev libpulse-dev libasound2-dev \
-  libvulkan-dev libfast-float-dev python3-jinja2 libmpv2
+  libvulkan-dev libfast-float-dev libffmpeg-nvenc-dev python3-jinja2 libmpv2
 pip install pyinstaller pyinstaller-hooks-contrib glad2 \
   PySide6 pyqtgraph numpy pillow python-mpv
 # (libmpv2 is only needed so PyInstaller can scan python-mpv; it is pruned.)
@@ -60,7 +60,8 @@ meson setup mpv/build mpv --prefix=$P --libdir=lib --buildtype=release \
   -Dgl=enabled -Dplain-gl=enabled -Degl=enabled -Degl-x11=enabled \
   -Degl-wayland=enabled -Dgl-x11=enabled -Dx11=enabled -Dwayland=enabled \
   -Dvaapi=enabled -Dvaapi-x11=enabled -Dvaapi-wayland=enabled \
-  -Dvaapi-drm=enabled -Ddrm=enabled -Dpulse=enabled -Dalsa=enabled \
+  -Dvaapi-drm=enabled -Ddrm=enabled -Dcuda-hwaccel=enabled -Dcuda-interop=enabled \
+  -Dpulse=enabled -Dalsa=enabled \
   -Dzlib=enabled -Diconv=enabled -Dlibavdevice=disabled
 ninja -C mpv/build install
 

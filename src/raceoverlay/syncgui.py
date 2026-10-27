@@ -130,6 +130,21 @@ def pick_file(parent, title: str, key: str, filt: str) -> str | None:
     return files[0]
 
 
+# Preview decoding modes -> mpv hwdec values.
+PREVIEW_DECODE = {
+    "copy": ("Auto: GPU decode, safe copy (recommended)", "auto-copy-safe"),
+    "direct": ("Direct GPU (fastest, can glitch on some drivers)",
+               "nvdec,vaapi,auto-safe"),
+    "off": ("Off: CPU only", "no"),
+}
+DEFAULT_PREVIEW_DECODE = "copy"
+
+
+def preview_hwdec() -> str:
+    key = settings().value("preview/decode", DEFAULT_PREVIEW_DECODE)
+    return PREVIEW_DECODE.get(key, PREVIEW_DECODE[DEFAULT_PREVIEW_DECODE])[1]
+
+
 def engine_args(job_file: str) -> list[str]:
     """Arguments to start the render engine with sys.executable."""
     if getattr(sys, "frozen", False):  # packaged build: one executable
@@ -220,7 +235,7 @@ class MpvWidget(QtOpenGLWidgets.QOpenGLWidget):
             extra = {"loglevel": lvl, "log_handler": lambda l, c, m:
                      sys.stderr.write(f"[mpv {l}] {c}: {m}")}
         self.player = mpv.MPV(
-            vo="libmpv", hwdec="auto-safe", keep_open="yes", hr_seek="yes",
+            vo="libmpv", hwdec=preview_hwdec(), keep_open="yes", hr_seek="yes",
             pause=True, input_default_bindings=False, input_vo_keyboard=False,
             **extra)
         try:  # only exists when libmpv was built with Lua (system mpv)
@@ -745,7 +760,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._drag = None  # (name, dx, dy) while moving a gauge
         self._hover = None
 
-        self.setWindowTitle("Race Overlay")
+        self.setWindowTitle("")  # Qt adds "Race Overlay <version>"
         self.resize(1520, 960)
         self._build_ui()
         self.player = self.video.player
@@ -1226,6 +1241,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self._menu_refresh()
 
         from . import __version__
+        vbox, vl = _group("Preview")
+        vl.addWidget(_note("How the preview player decodes video. Doesn't "
+                           "affect rendered videos.", small=True))
+        self.decode_pick = QtWidgets.QComboBox()
+        self.decode_pick.setFocusPolicy(QtCore.Qt.ClickFocus)
+        for key, (label, _v) in PREVIEW_DECODE.items():
+            self.decode_pick.addItem(label, key)
+        cur = settings().value("preview/decode", DEFAULT_PREVIEW_DECODE)
+        self.decode_pick.setCurrentIndex(max(0, self.decode_pick.findData(cur)))
+        self.decode_pick.currentIndexChanged.connect(self._decode_changed)
+        vl.addWidget(self.decode_pick)
+        self.decode_lbl = _note("", small=True)
+        vl.addWidget(self.decode_lbl)
+        vl.addWidget(_note("If the preview shows stripes or blocky glitches "
+                           "(NVIDIA with the VA-API wrapper, some older "
+                           "drivers), use Auto or Off.", small=True))
+        pv.addWidget(vbox)
+
         abox, al2 = _group("About")
         al2.addWidget(_note(f"Race Overlay {__version__}", small=True))
         pv.addWidget(abox)
@@ -1300,7 +1333,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.span.setRegion((0, info.duration))
         self.video.load(media.mpv_url(self.parts))
         extra = f" (+{len(parts) - 1} more)" if len(parts) > 1 else ""
-        self.setWindowTitle(f"Race Overlay - {Path(path).name}{extra}")
+        self.setWindowTitle(f"{Path(path).name}{extra}")
         self._fill_format_pickers()
 
         saved = load_sync(path)
@@ -1910,6 +1943,27 @@ class MainWindow(QtWidgets.QMainWindow):
             add_menu_entry(p)
         self._menu_refresh()
 
+    def _decode_changed(self, _i=None):
+        key = self.decode_pick.currentData()
+        settings().setValue("preview/decode", key)
+        try:
+            self.player["hwdec"] = PREVIEW_DECODE[key][1]
+            if self.video_path:  # re-open the decoder at the current frame
+                self._seek_abs(self._vt())
+        except Exception:
+            pass
+
+    def _update_decode_label(self):
+        if not hasattr(self, "decode_lbl"):
+            return
+        try:
+            cur = self.player.hwdec_current or "no"
+        except Exception:
+            cur = "?"
+        name = {"no": "CPU (software)", "?": "unknown"}.get(cur, cur)
+        self.decode_lbl.setText(f"Decoding with: <b>{name}</b>"
+                                if self.video_path else "")
+
     def _opt(self, key: str, value):
         self.gauge_opts[key] = value
         if self.ctx:
@@ -2121,6 +2175,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # ========================================================= periodic ===
 
     def _tick(self):
+        self._tick_n = getattr(self, "_tick_n", 0) + 1
+        if self._tick_n % 20 == 0:  # about once a second
+            self._update_decode_label()
         if self._hw is not None and not self._hw_applied:
             self._apply_hw()
         if self.info is None:
@@ -2601,7 +2658,8 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QtWidgets.QApplication(["raceoverlay"])
     app.setApplicationName("raceoverlay")
-    app.setApplicationDisplayName("Race Overlay")
+    from . import __version__
+    app.setApplicationDisplayName(f"Race Overlay {__version__}")
     app.setDesktopFileName("raceoverlay")
     icon = Path(__file__).with_name("icon.svg")
     if icon.exists():

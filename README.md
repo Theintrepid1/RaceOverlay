@@ -160,6 +160,10 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.1 — preview decoding setting (default: GPU decode with safe copy), NVIDIA
+NVDEC support, version in the window title. Fixes striped/blocky preview on
+NVIDIA with nvidia-vaapi-driver.
+
 v0.9 — AppImage: one file, no terminal, bundled ffmpeg 8.1 + lean libmpv
 0.41, app-menu integration on first run, VAAPI preview decode via EGL.
 

@@ -1,8 +1,12 @@
 # Roadmap
 
 ## Next (v0.10) — collecting ideas, not started
-- Version marker: version in the window title and an About box (version,
-  repo link, licenses). Not burned into rendered videos.
+- (add ideas here)
+
+## Done
+- v0.9.1: version shown in the window title; About section on the Setup tab
+- v0.9.1: preview decoding setting (safe copy default) + NVDEC; fixes striped
+  preview on NVIDIA with the VA-API wrapper
 
 ## Before 1.0
 - Real-session testing on Cam's machine (AppImage, GPU decode/encode)
