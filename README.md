@@ -160,6 +160,9 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.4 — fixes v0.9.3's system-mpv preference silently falling back to the
+built-in player on newer distros (CachyOS/Arch).
+
 v0.9.3 — preview uses the system's mpv when it's installed (clean NVIDIA GPU
 decode); built-in player is the fallback. Setup tab shows which player is in
 use and can force the built-in one.

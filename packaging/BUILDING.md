@@ -74,6 +74,10 @@ python3 packaging/build_appimage.py --ffmpeg $W/ffmpeg \
 
 ## Testing switches
 
+- `RACEOVERLAY_BUNDLED_MPV=1`: ignore the system mpv, use the built-in one.
+  (Bundle setup runs in packaging/raceoverlay_boot.py, a PyInstaller runtime
+  hook, so it happens before Qt loads any bundled library.)
+
 - `RACEOVERLAY_FORCE_FALLBACK=1`: ignore the host's copies of libmpv's
   desktop libraries and use the bundled fallbacks.
 - `RACEOVERLAY_MPV_LOG=v`: mpv's log on stderr (look for

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import html
 import json
 import locale
 import os
@@ -1985,6 +1986,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ver = "?"
         src = os.environ.get("RACEOVERLAY_MPV_SOURCE", "system")
         player = f"{'system' if src == 'system' else 'built-in'} mpv {ver}"
+        note = os.environ.get("RACEOVERLAY_MPV_NOTE")
+        if note and src != "system":
+            player += f"<br><i>{html.escape(note)}</i>"
         self.decode_lbl.setText((f"Decoding with: <b>{name}</b><br>" if self.video_path
                                  else "") + f"Player: {player}")
 
@@ -2719,6 +2723,15 @@ def main(argv: list[str] | None = None) -> int:
     win = MainWindow()
     win.show()
     QtCore.QTimer.singleShot(400, win.offer_menu_entry)
+
+    def started_ok():  # the system mpv got us to a working window
+        guard = os.environ.pop("RACEOVERLAY_MPV_GUARD", None)
+        if guard:
+            try:
+                os.remove(guard)
+            except OSError:
+                pass
+    QtCore.QTimer.singleShot(3000, started_ok)
     video = args.video or args.video_pos
     if video:
         if os.path.exists(video):

@@ -4,6 +4,9 @@
 - (add ideas here)
 
 ## Done
+- v0.9.4: system mpv actually loads on newer distros (its libraries were being
+  resolved to the bundle's older Ubuntu copies); crash guard; reason shown
+  when it falls back
 - v0.9.3: uses the system's mpv for the preview when installed (fixes NVIDIA
   GPU-decode striping seen with the bundled player); "Player:" readout and a
   Setup toggle to force the built-in player

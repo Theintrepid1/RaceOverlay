@@ -158,7 +158,8 @@ def main():
            "--collect-submodules", "raceoverlay",
            "--add-data", f"{src / 'fonts'}:raceoverlay/fonts",
            "--add-data", f"{src / 'icon.svg'}:raceoverlay",
-           "--hidden-import", "mpv"]
+           "--hidden-import", "mpv",
+           "--runtime-hook", str(ROOT / "packaging" / "raceoverlay_boot.py")]
     for m in EXCLUDE_MODULES:
         cmd += ["--exclude-module", m]
     run(cmd + [str(ROOT / "packaging" / "raceoverlay_app.py")])
