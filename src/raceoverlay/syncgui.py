@@ -130,12 +130,17 @@ def pick_file(parent, title: str, key: str, filt: str) -> str | None:
     return files[0]
 
 
-# Preview decoding modes -> mpv hwdec values.
+# Preview decoding modes -> mpv hwdec values. Vulkan video decoding is left
+# out of Auto/Direct: it corrupts frames on some NVIDIA drivers.
 PREVIEW_DECODE = {
-    "copy": ("Auto: GPU decode, safe copy (recommended)", "auto-copy-safe"),
-    "direct": ("Direct GPU (fastest, can glitch on some drivers)",
-               "nvdec,vaapi,auto-safe"),
+    "copy": ("Auto: GPU decode, safe copy (recommended)", "nvdec-copy,vaapi-copy"),
+    "direct": ("Direct GPU (fastest, can glitch on some drivers)", "nvdec,vaapi"),
     "off": ("Off: CPU only", "no"),
+    "t_nvdec_copy": ("Test: NVDEC, copy", "nvdec-copy"),
+    "t_nvdec": ("Test: NVDEC, direct", "nvdec"),
+    "t_vaapi_copy": ("Test: VA-API, copy", "vaapi-copy"),
+    "t_vaapi": ("Test: VA-API, direct", "vaapi"),
+    "t_vulkan_copy": ("Test: Vulkan, copy", "vulkan-copy"),
 }
 DEFAULT_PREVIEW_DECODE = "copy"
 
@@ -1247,6 +1252,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decode_pick = QtWidgets.QComboBox()
         self.decode_pick.setFocusPolicy(QtCore.Qt.ClickFocus)
         for key, (label, _v) in PREVIEW_DECODE.items():
+            if key == "t_nvdec_copy":
+                self.decode_pick.insertSeparator(self.decode_pick.count())
             self.decode_pick.addItem(label, key)
         cur = settings().value("preview/decode", DEFAULT_PREVIEW_DECODE)
         self.decode_pick.setCurrentIndex(max(0, self.decode_pick.findData(cur)))
@@ -1254,9 +1261,11 @@ class MainWindow(QtWidgets.QMainWindow):
         vl.addWidget(self.decode_pick)
         self.decode_lbl = _note("", small=True)
         vl.addWidget(self.decode_lbl)
-        vl.addWidget(_note("If the preview shows stripes or blocky glitches "
-                           "(NVIDIA with the VA-API wrapper, some older "
-                           "drivers), use Auto or Off.", small=True))
+        vl.addWidget(_note("If the preview shows stripes or blocky glitches, "
+                           "try the Test options to find a GPU decoder that "
+                           "works on your machine, or use Off. If a Test "
+                           "option can't start, it quietly uses the CPU "
+                           "(check the line above).", small=True))
         pv.addWidget(vbox)
 
         abox, al2 = _group("About")
