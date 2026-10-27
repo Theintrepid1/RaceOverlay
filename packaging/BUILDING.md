@@ -74,6 +74,9 @@ python3 packaging/build_appimage.py --ffmpeg $W/ffmpeg \
 
 ## Testing switches
 
+- `RACEOVERLAY_PREVIEW=embedded|native`: override the player-window setting.
+- `RACEOVERLAY_GPU_SW=1`: let mpv use a software GL (headless Xvfb testing).
+
 - `RACEOVERLAY_BUNDLED_MPV=1`: ignore the system mpv, use the built-in one.
   (Bundle setup runs in packaging/raceoverlay_boot.py, a PyInstaller runtime
   hook, so it happens before Qt loads any bundled library.)

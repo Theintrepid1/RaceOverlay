@@ -4,6 +4,9 @@
 - (add ideas here)
 
 ## Done
+- v0.9.5: native-window preview (mpv draws in its own X11 window, gpu-next
+  renderer, like standalone mpv) — default; old embedded mode kept in Setup.
+  Aimed at striped GPU preview on NVIDIA, where standalone mpv is clean
 - v0.9.4: system mpv actually loads on newer distros (its libraries were being
   resolved to the bundle's older Ubuntu copies); crash guard; reason shown
   when it falls back
@@ -16,7 +19,7 @@
   preview on NVIDIA with the VA-API wrapper
 
 ## Before 1.0
-- Fix GPU decode in the bundled player on NVIDIA (bundled ffmpeg 8.1 vs system)
+- Confirm native-window preview fixes NVIDIA GPU decode (Cam's desktop)
 - Real-session testing on Cam's machine (AppImage, GPU decode/encode)
 - License decision (GPL-3.0 recommended; bundles GPL ffmpeg/mpv)
 - Older-distro AppImage build if a teammate needs it (Ubuntu 22.04 / Debian 12)

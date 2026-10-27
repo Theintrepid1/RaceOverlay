@@ -160,6 +160,10 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.5 — preview player now draws in its own native window by default (same
+renderer as standalone mpv); runs through XWayland on Wayland desktops.
+Setup > Preview > Player window switches back to the embedded mode.
+
 v0.9.4 — fixes v0.9.3's system-mpv preference silently falling back to the
 built-in player on newer distros (CachyOS/Arch).
 

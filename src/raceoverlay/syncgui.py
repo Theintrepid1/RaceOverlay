@@ -151,6 +151,25 @@ def preview_hwdec() -> str:
     return PREVIEW_DECODE.get(key, PREVIEW_DECODE[DEFAULT_PREVIEW_DECODE])[1]
 
 
+PREVIEW_MODES = {
+    "native": "Native window (recommended)",
+    "embedded": "Embedded (older; try if Native misbehaves)",
+}
+
+
+def preview_mode() -> str:
+    """'native': mpv draws into its own X11 window inside ours, exactly like
+    the standalone player (newer gpu-next renderer, its own GPU interop).
+    'embedded': mpv renders into Qt's OpenGL widget via the render API; on
+    some NVIDIA setups that path stripes every GPU-decoded frame.
+    Native needs X11 (XWayland is fine on Wayland desktops)."""
+    mode = os.environ.get("RACEOVERLAY_PREVIEW") or settings().value(
+        "preview/mode", "native")
+    if mode == "native" and not os.environ.get("DISPLAY"):
+        return "embedded"  # pure Wayland without XWayland
+    return mode if mode in PREVIEW_MODES else "native"
+
+
 def engine_args(job_file: str) -> list[str]:
     """Arguments to start the render engine with sys.executable."""
     if getattr(sys, "frozen", False):  # packaged build: one executable
@@ -314,6 +333,80 @@ class MpvWidget(QtOpenGLWidgets.QOpenGLWidget):
             self.ctx.free()
             self.ctx = None
             self.doneCurrent()
+        self.player.terminate()
+
+
+class MpvNativeWidget(QtWidgets.QWidget):
+    """mpv drawing into its own native (X11) child window, like standalone
+    mpv. Mouse and keyboard events fall through to Qt (mpv is told to ignore
+    them), so gauge dragging and shortcuts work the same as embedded."""
+
+    pressed = QtCore.Signal(float, float, object)
+    dragged = QtCore.Signal(float, float)
+    released = QtCore.Signal(float, float)
+    wheeled = QtCore.Signal(float, float, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        import mpv
+        self.setAttribute(QtCore.Qt.WA_NativeWindow)
+        self.setAttribute(QtCore.Qt.WA_DontCreateNativeAncestors)
+        self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(QtGui.QPalette.Window, QtCore.Qt.black)
+        self.setPalette(pal)
+        extra = {}
+        lvl = os.environ.get("RACEOVERLAY_MPV_LOG")
+        if lvl:
+            extra = {"loglevel": lvl, "log_handler": lambda l, c, m:
+                     sys.stderr.write(f"[mpv {l}] {c}: {m}")}
+        if os.environ.get("RACEOVERLAY_GPU_SW"):  # headless testing only
+            extra["gpu_sw"] = True
+        self.player = mpv.MPV(
+            vo="gpu-next,gpu", hwdec=preview_hwdec(), keep_open="yes",
+            hr_seek="yes", pause=True, input_default_bindings=False,
+            input_vo_keyboard=False, input_cursor=False, cursor_autohide="no",
+            **extra)
+        try:
+            self.player["osc"] = False
+        except Exception:
+            pass
+        self._wid_set = False
+        self.setMinimumSize(480, 270)
+
+    def _attach(self):
+        if not self._wid_set:
+            self.player["wid"] = int(self.winId())
+            self._wid_set = True
+
+    def load(self, path: str):
+        self._attach()
+        self.player.play(path)
+
+    def _dev(self, ev):
+        p = ev.position()
+        r = self.devicePixelRatioF()
+        return p.x() * r, p.y() * r
+
+    def mousePressEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton:
+            x, y = self._dev(ev)
+            self.pressed.emit(x, y, ev.modifiers())
+
+    def mouseMoveEvent(self, ev):
+        if ev.buttons() & QtCore.Qt.LeftButton:
+            self.dragged.emit(*self._dev(ev))
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == QtCore.Qt.LeftButton:
+            self.released.emit(*self._dev(ev))
+
+    def wheelEvent(self, ev):
+        x, y = self._dev(ev)
+        self.wheeled.emit(x, y, ev.angleDelta().y())
+
+    def shutdown(self):
         self.player.terminate()
 
 
@@ -781,7 +874,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # ================================================================ UI ===
 
     def _build_ui(self):
-        self.video = MpvWidget()
+        self.video = (MpvNativeWidget() if preview_mode() == "native"
+                      else MpvWidget())
         self.video.pressed.connect(self._video_pressed)
         self.video.dragged.connect(self._video_dragged)
         self.video.released.connect(self._video_released)
@@ -1260,6 +1354,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.decode_pick.setCurrentIndex(max(0, self.decode_pick.findData(cur)))
         self.decode_pick.currentIndexChanged.connect(self._decode_changed)
         vl.addWidget(self.decode_pick)
+        mrow = QtWidgets.QHBoxLayout()
+        mrow.addWidget(QtWidgets.QLabel("Player window:"))
+        self.mode_pick = QtWidgets.QComboBox()
+        self.mode_pick.setFocusPolicy(QtCore.Qt.ClickFocus)
+        for key, label in PREVIEW_MODES.items():
+            self.mode_pick.addItem(label, key)
+        self.mode_pick.setCurrentIndex(max(0, self.mode_pick.findData(
+            settings().value("preview/mode", "native"))))
+        self.mode_pick.currentIndexChanged.connect(
+            lambda _i: (settings().setValue("preview/mode",
+                                            self.mode_pick.currentData()),
+                        self.status.setText("Player window change applies "
+                                            "after a restart.")))
+        self.mode_pick.setToolTip(
+            "Native: mpv draws in its own window, like the standalone mpv "
+            "player (fixes striped GPU preview on some NVIDIA setups).\n"
+            "Embedded: the older way. Restart to apply.")
+        mrow.addWidget(self.mode_pick, 1)
+        vl.addLayout(mrow)
         self.decode_lbl = _note("", small=True)
         vl.addWidget(self.decode_lbl)
         if getattr(sys, "frozen", False):
@@ -1986,6 +2099,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ver = "?"
         src = os.environ.get("RACEOVERLAY_MPV_SOURCE", "system")
         player = f"{'system' if src == 'system' else 'built-in'} mpv {ver}"
+        try:
+            vo = self.player.current_vo
+        except Exception:
+            vo = None
+        player += f", {'native window' if isinstance(self.video, MpvNativeWidget) else 'embedded'}"
+        if vo and vo != "libmpv":
+            player += f" ({vo})"
         note = os.environ.get("RACEOVERLAY_MPV_NOTE")
         if note and src != "system":
             player += f"<br><i>{html.escape(note)}</i>"
@@ -2684,6 +2804,8 @@ def main(argv: list[str] | None = None) -> int:
     fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 
+    if preview_mode() == "native" and not os.environ.get("QT_QPA_PLATFORM"):
+        os.environ["QT_QPA_PLATFORM"] = "xcb"  # native mpv window needs X11
     app = QtWidgets.QApplication(["raceoverlay"])
     app.setApplicationName("raceoverlay")
     from . import __version__
