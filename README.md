@@ -160,6 +160,8 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.8 — fixes garbage in the empty preview area before a video is opened.
+
 v0.9.7 — clean GPU preview on NVIDIA/KDE Wayland: native player window drawn
 through X11, built-in mpv by default.
 

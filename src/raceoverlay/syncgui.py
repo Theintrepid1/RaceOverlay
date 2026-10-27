@@ -351,8 +351,7 @@ class MpvNativeWidget(QtWidgets.QWidget):
         import mpv
         self.setAttribute(QtCore.Qt.WA_NativeWindow)
         self.setAttribute(QtCore.Qt.WA_DontCreateNativeAncestors)
-        self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent)
-        self.setAutoFillBackground(True)
+        self.setAutoFillBackground(True)  # black until mpv's window covers it
         pal = self.palette()
         pal.setColor(QtGui.QPalette.Window, QtCore.Qt.black)
         self.setPalette(pal)
@@ -386,6 +385,9 @@ class MpvNativeWidget(QtWidgets.QWidget):
     def load(self, path: str):
         self._attach()
         self.player.play(path)
+
+    def paintEvent(self, ev):  # nothing playing yet: plain black, not junk
+        QtGui.QPainter(self).fillRect(ev.rect(), QtCore.Qt.black)
 
     def _dev(self, ev):
         p = ev.position()

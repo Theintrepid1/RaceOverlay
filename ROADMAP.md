@@ -4,6 +4,7 @@
 - (add ideas here)
 
 ## Done
+- v0.9.8: native preview area is plain black before a video loads (was garbage)
 - v0.9.7: native preview forced to an X11 GPU context (Wayland desktops opened a
   separate mpv window); built-in mpv is the default again (system mpv crashed
   at startup on CachyOS when mixed with the bundle's X11 libs; now opt-in via
