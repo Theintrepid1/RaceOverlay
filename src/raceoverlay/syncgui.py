@@ -364,7 +364,10 @@ class MpvNativeWidget(QtWidgets.QWidget):
         if os.environ.get("RACEOVERLAY_GPU_SW"):  # headless testing only
             extra["gpu_sw"] = True
         self.player = mpv.MPV(
-            vo="gpu-next,gpu", hwdec=preview_hwdec(), keep_open="yes",
+            # X11 only: on a Wayland desktop mpv would otherwise pick a
+            # Wayland context, ignore the window id and open its own window.
+            vo="gpu-next,gpu", gpu_context="x11egl", hwdec=preview_hwdec(),
+            keep_open="yes",
             hr_seek="yes", pause=True, input_default_bindings=False,
             input_vo_keyboard=False, input_cursor=False, cursor_autohide="no",
             **extra)
@@ -1376,15 +1379,6 @@ class MainWindow(QtWidgets.QMainWindow):
         vl.addLayout(mrow)
         self.decode_lbl = _note("", small=True)
         vl.addWidget(self.decode_lbl)
-        if getattr(sys, "frozen", False):
-            self.sysmpv_box = _check(
-                "Use the system's mpv when installed (restart to apply)",
-                settings().value("preview/use_system_mpv", True, type=bool),
-                lambda on: settings().setValue("preview/use_system_mpv", on),
-                "Distro-built mpv usually has the best-tested GPU decoding "
-                "for your drivers. Falls back to the built-in player if mpv "
-                "isn't installed.")
-            vl.addWidget(self.sysmpv_box)
         vl.addWidget(_note("If the preview shows stripes or blocky glitches, "
                            "try the Test options to find a GPU decoder that "
                            "works on your machine, or use Off. If a Test "
@@ -2863,6 +2857,7 @@ def main(argv: list[str] | None = None) -> int:
             except OSError:
                 pass
     QtCore.QTimer.singleShot(3000, started_ok)
+    app.aboutToQuit.connect(started_ok)  # a quick normal quit isn't a crash
     video = args.video or args.video_pos
     if video:
         if os.path.exists(video):

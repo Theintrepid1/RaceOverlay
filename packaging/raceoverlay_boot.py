@@ -30,17 +30,10 @@ import sys
 
 
 def _prefer_system_mpv() -> bool:
-    """Setup > Preview > 'Use the system's mpv when installed' (default on).
-    RACEOVERLAY_BUNDLED_MPV=1 forces the bundled one (escape hatch)."""
-    if os.environ.get("RACEOVERLAY_BUNDLED_MPV"):
-        return False
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    c = configparser.ConfigParser()
-    try:
-        c.read(os.path.join(base, "raceoverlay", "raceoverlay.conf"))
-        return c.get("preview", "use_system_mpv", fallback="true").lower() != "false"
-    except (configparser.Error, OSError):
-        return True
+    """Opt-in only (RACEOVERLAY_SYSTEM_MPV=1). The built-in player is the
+    tested default: mixing a distro libmpv's libraries with the bundle's
+    X11/Qt libraries crashed at startup on CachyOS (v0.9.6)."""
+    return os.environ.get("RACEOVERLAY_SYSTEM_MPV") == "1"
 
 
 # ---------------------------------------------------------------- system mpv
@@ -196,9 +189,8 @@ def _setup_bundle(load_mpv: bool):
         guard = _guard_file()
         if os.path.exists(guard):
             # The last launch with the system mpv never reached the window.
-            _disable_system_mpv()
             os.environ["RACEOVERLAY_MPV_NOTE"] = (
-                "system mpv turned off: the last start with it didn't finish")
+                "system mpv skipped: the last start with it didn't finish")
             try:
                 os.remove(guard)
             except OSError:

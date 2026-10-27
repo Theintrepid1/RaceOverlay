@@ -4,6 +4,10 @@
 - (add ideas here)
 
 ## Done
+- v0.9.7: native preview forced to an X11 GPU context (Wayland desktops opened a
+  separate mpv window); built-in mpv is the default again (system mpv crashed
+  at startup on CachyOS when mixed with the bundle's X11 libs; now opt-in via
+  RACEOVERLAY_SYSTEM_MPV=1); normal quit clears the crash guard
 - v0.9.6: native preview stays inside the main window on Wayland desktops
   that set QT_QPA_PLATFORM (it opened as a separate window in v0.9.5)
 - v0.9.5: native-window preview (mpv draws in its own X11 window, gpu-next
@@ -21,7 +25,7 @@
   preview on NVIDIA with the VA-API wrapper
 
 ## Before 1.0
-- Confirm native-window preview fixes NVIDIA GPU decode (Cam's desktop)
+- Diagnose system-mpv startup crash on CachyOS (only if system mpv is worth keeping)
 - Real-session testing on Cam's machine (AppImage, GPU decode/encode)
 - License decision (GPL-3.0 recommended; bundles GPL ffmpeg/mpv)
 - Older-distro AppImage build if a teammate needs it (Ubuntu 22.04 / Debian 12)

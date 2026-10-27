@@ -74,6 +74,11 @@ python3 packaging/build_appimage.py --ffmpeg $W/ffmpeg \
 
 ## Testing switches
 
+- `RACEOVERLAY_SYSTEM_MPV=1`: try the distro's libmpv instead of the built-in one.
+- Wayland repro: `weston --backend=headless --xwayland --socket=wayland-9`, then
+  run with `WAYLAND_DISPLAY=wayland-9 DISPLAY=:0 RACEOVERLAY_MPV_LOG=v` and look
+  for `Initializing GPU context 'x11egl'`.
+
 - `RACEOVERLAY_PREVIEW=embedded|native`: override the player-window setting.
 - `RACEOVERLAY_GPU_SW=1`: let mpv use a software GL (headless Xvfb testing).
 

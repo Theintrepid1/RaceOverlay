@@ -160,6 +160,9 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.7 — clean GPU preview on NVIDIA/KDE Wayland: native player window drawn
+through X11, built-in mpv by default.
+
 v0.9.6 — fixes the native preview opening as a separate window on KDE
 Wayland.
 
