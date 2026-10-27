@@ -160,6 +160,10 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.3 — preview uses the system's mpv when it's installed (clean NVIDIA GPU
+decode); built-in player is the fallback. Setup tab shows which player is in
+use and can force the built-in one.
+
 v0.9.1 — preview decoding setting (default: GPU decode with safe copy), NVIDIA
 NVDEC support, version in the window title. Fixes striped/blocky preview on
 NVIDIA with nvidia-vaapi-driver.

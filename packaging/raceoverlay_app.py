@@ -14,6 +14,7 @@ Before anything Qt or mpv related loads it sets up the bundle:
     VA-API, Wayland/X11 helpers) come from the system when present and from
     the bundle's fallback copies only when missing.
 """
+import configparser
 import ctypes
 import ctypes.util
 import json
@@ -22,7 +23,30 @@ import os
 import sys
 
 
-def _setup_bundle():
+def _prefer_system_mpv() -> bool:
+    """Setup > Preview > 'Use the system's mpv when installed' (default on).
+    RACEOVERLAY_BUNDLED_MPV=1 forces the bundled one (escape hatch)."""
+    if os.environ.get("RACEOVERLAY_BUNDLED_MPV"):
+        return False
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    c = configparser.ConfigParser()
+    try:
+        c.read(os.path.join(base, "raceoverlay", "raceoverlay.conf"))
+        return c.get("preview", "use_system_mpv", fallback="true").lower() != "false"
+    except (configparser.Error, OSError):
+        return True
+
+
+def _use_mpv(soname_or_path: str, source: str):
+    real_find = ctypes.util.find_library
+
+    def find_library(name):  # python-mpv asks for 'mpv'
+        return soname_or_path if name == "mpv" else real_find(name)
+    ctypes.util.find_library = find_library
+    os.environ["RACEOVERLAY_MPV_SOURCE"] = source
+
+
+def _setup_bundle(load_mpv: bool):
     base = getattr(sys, "_MEIPASS", None)
     if not base:
         return
@@ -36,6 +60,15 @@ def _setup_bundle():
     if os.path.isdir(ffbin) and not os.environ.get("RACEOVERLAY_SYSTEM_FFMPEG"):
         os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
 
+    if not load_mpv:  # renders and the CLI never touch the player
+        return
+    if _prefer_system_mpv():
+        try:  # the system's own mpv (distro-built, matches its drivers)
+            ctypes.CDLL("libmpv.so.2", mode=ctypes.RTLD_LOCAL)
+            _use_mpv("libmpv.so.2", "system")
+            return
+        except OSError:
+            pass  # not installed, or doesn't load next to the bundle
     libdir = os.path.join(base, "mpvlib")
     mpv_so = os.path.join(libdir, "libmpv.so.2")
     if not os.path.exists(mpv_so):
@@ -78,17 +111,13 @@ def _setup_bundle():
     # via libass) must not take over symbols of other bundled libraries,
     # e.g. Pillow's own FreeType, or text rendering breaks.
     ctypes.CDLL(mpv_so, mode=ctypes.RTLD_LOCAL)
-    real_find = ctypes.util.find_library
-
-    def find_library(name):  # python-mpv asks for 'mpv'
-        return mpv_so if name == "mpv" else real_find(name)
-    ctypes.util.find_library = find_library
+    _use_mpv(mpv_so, "bundled")
 
 
 def main():
     multiprocessing.freeze_support()  # render workers re-enter here
-    _setup_bundle()
     args = sys.argv[1:]
+    _setup_bundle(load_mpv=args[:1] not in (["--engine"], ["--cli"]))
     if args[:1] == ["--engine"]:
         from raceoverlay import engine
         return engine.main(args[1:])
