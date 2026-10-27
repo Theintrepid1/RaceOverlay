@@ -160,6 +160,9 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.6 — fixes the native preview opening as a separate window on KDE
+Wayland.
+
 v0.9.5 — preview player now draws in its own native window by default (same
 renderer as standalone mpv); runs through XWayland on Wayland desktops.
 Setup > Preview > Player window switches back to the embedded mode.

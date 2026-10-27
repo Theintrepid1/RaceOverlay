@@ -4,6 +4,8 @@
 - (add ideas here)
 
 ## Done
+- v0.9.6: native preview stays inside the main window on Wayland desktops
+  that set QT_QPA_PLATFORM (it opened as a separate window in v0.9.5)
 - v0.9.5: native-window preview (mpv draws in its own X11 window, gpu-next
   renderer, like standalone mpv) — default; old embedded mode kept in Setup.
   Aimed at striped GPU preview on NVIDIA, where standalone mpv is clean

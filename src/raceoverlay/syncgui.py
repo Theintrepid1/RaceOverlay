@@ -874,8 +874,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # ================================================================ UI ===
 
     def _build_ui(self):
-        self.video = (MpvNativeWidget() if preview_mode() == "native"
-                      else MpvWidget())
+        native = (preview_mode() == "native"
+                  and QtGui.QGuiApplication.platformName() == "xcb")
+        self.video = MpvNativeWidget() if native else MpvWidget()
         self.video.pressed.connect(self._video_pressed)
         self.video.dragged.connect(self._video_dragged)
         self.video.released.connect(self._video_released)
@@ -2804,9 +2805,17 @@ def main(argv: list[str] | None = None) -> int:
     fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 
-    if preview_mode() == "native" and not os.environ.get("QT_QPA_PLATFORM"):
-        os.environ["QT_QPA_PLATFORM"] = "xcb"  # native mpv window needs X11
+    # The native mpv window needs Qt on X11 (XWayland on Wayland desktops),
+    # even when the session sets QT_QPA_PLATFORM=wayland: under Wayland mpv
+    # can't embed and opens a separate top-level window instead.
+    orig_qpa = os.environ.get("QT_QPA_PLATFORM")
+    if preview_mode() == "native":
+        os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QtWidgets.QApplication(["raceoverlay"])
+    if orig_qpa is None:  # programs we launch get the session's setting
+        os.environ.pop("QT_QPA_PLATFORM", None)
+    else:
+        os.environ["QT_QPA_PLATFORM"] = orig_qpa
     app.setApplicationName("raceoverlay")
     from . import __version__
     app.setApplicationDisplayName(f"Race Overlay {__version__}")
