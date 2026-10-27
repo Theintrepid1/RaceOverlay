@@ -1,0 +1,31 @@
+RACE OVERLAY — HOW TO OPEN
+==========================
+
+1. Download RaceOverlay-x.y.z-x86_64.AppImage (one file, nothing to install).
+
+2. Allow it to run (one time only). Linux won't run a downloaded file until
+   you say it's OK:
+     KDE (Dolphin):  right-click the file > Properties > Permissions >
+                     tick "Is executable" (newer Dolphin may just ask
+                     "Execute?" when you double-click; say yes).
+     GNOME (Files):  right-click > Properties > turn on
+                     "Executable as Program".
+     Others:         right-click > Properties > Permissions >
+                     "Allow executing file as program".
+
+3. Double-click it. The first time, it offers to add itself to your app
+   menu, so after that you can start it like any other app and use
+   right-click > Open With on video files.
+
+Moving the file later is fine: the menu entry follows it the next time you
+start it from the new place.
+
+IF IT DOESN'T START
+- Nothing happens on double-click: AppImages need FUSE, which almost every
+  desktop distro ships. If yours doesn't, install the "fuse3" package
+  (Arch/CachyOS: fuse3, Debian/Ubuntu: fuse3, Fedora: fuse3).
+- It needs a fairly current distro (2024 or newer: Ubuntu 24.04+, Fedora
+  40+, Arch/CachyOS/Manjaro, openSUSE Tumbleweed, Mint 22+, Debian 13+).
+
+Everything it needs (ffmpeg, mpv, Qt, Python) is inside the file. Your
+system's own graphics drivers are used for hardware video decode/encode.

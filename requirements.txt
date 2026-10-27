@@ -1,0 +1,6 @@
+numpy
+Pillow
+# sync GUI
+PySide6
+pyqtgraph
+python-mpv

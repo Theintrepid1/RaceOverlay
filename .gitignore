@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+build-deps/
+*.AppImage
+*.sync.json
+*_overlay.mp4
+*_preview.mp4
+.*.parts/
