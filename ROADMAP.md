@@ -4,6 +4,10 @@
 - (add ideas here)
 
 ## Done
+- v0.9.9: side panel no longer clips (long filenames wrap, dropdowns don't size
+  to their longest item, panel resizable, window fits the screen); Test
+  decoders and Player window behind "Show advanced options"; clearer frame
+  rate labels (60 recommended, Source marked slower)
 - v0.9.8: native preview area is plain black before a video loads (was garbage)
 - v0.9.7: native preview forced to an X11 GPU context (Wayland desktops opened a
   separate mpv window); built-in mpv is the default again (system mpv crashed

@@ -134,8 +134,8 @@ def pick_file(parent, title: str, key: str, filt: str) -> str | None:
 # Preview decoding modes -> mpv hwdec values. Vulkan video decoding is left
 # out of Auto/Direct: it corrupts frames on some NVIDIA drivers.
 PREVIEW_DECODE = {
-    "copy": ("Auto: GPU decode, safe copy (recommended)", "nvdec-copy,vaapi-copy"),
-    "direct": ("Direct GPU (fastest, can glitch on some drivers)", "nvdec,vaapi"),
+    "copy": ("Auto: GPU, safe copy (recommended)", "nvdec-copy,vaapi-copy"),
+    "direct": ("Direct GPU (fastest)", "nvdec,vaapi"),
     "off": ("Off: CPU only", "no"),
     "t_nvdec_copy": ("Test: NVDEC, copy", "nvdec-copy"),
     "t_nvdec": ("Test: NVDEC, direct", "nvdec"),
@@ -152,8 +152,8 @@ def preview_hwdec() -> str:
 
 
 PREVIEW_MODES = {
-    "native": "Native window (recommended)",
-    "embedded": "Embedded (older; try if Native misbehaves)",
+    "native": "Native (recommended)",
+    "embedded": "Embedded (older)",
 }
 
 
@@ -502,7 +502,7 @@ def _tab_page() -> tuple[QtWidgets.QScrollArea, QtWidgets.QVBoxLayout]:
     scroll = QtWidgets.QScrollArea()
     scroll.setWidget(page)
     scroll.setWidgetResizable(True)
-    scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
     scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
     return scroll, lay
 
@@ -865,7 +865,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hover = None
 
         self.setWindowTitle("")  # Qt adds "Race Overlay <version>"
-        self.resize(1520, 960)
+        avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        self.resize(min(1520, int(avail.width() * 0.92)),
+                    min(960, int(avail.height() * 0.92)))
         self._build_ui()
         self.player = self.video.player
         self.overlay = MpvOverlay(self.player)
@@ -948,18 +950,34 @@ class MainWindow(QtWidgets.QMainWindow):
         lv.addWidget(self.plot)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.setFixedWidth(390)
+        self.tabs.setMinimumWidth(360)
         self.tabs.addTab(self._build_sync_tab(), "Sync")
         self.tabs.addTab(self._build_export_tab(), "Export")
         self.tabs.addTab(self._build_look_tab(), "Look")
         self.tabs.addTab(self._build_setup_tab(), "Setup")
         self.tabs.currentChanged.connect(lambda _: self._invalidate_overlay())
 
-        central = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(central)
-        h.addWidget(left, 1)
-        h.addWidget(self.tabs)
-        self.setCentralWidget(central)
+        for c in self.tabs.findChildren(QtWidgets.QComboBox):
+            # Size to a short minimum, not the longest item, so one long
+            # entry can't push the panel past its edge; the open list still
+            # shows the full text.
+            c.setSizeAdjustPolicy(
+                QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            c.setMinimumContentsLength(8)
+            c.view().setMinimumWidth(c.view().sizeHintForColumn(0) + 24)
+        self.split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.split.addWidget(left)
+        self.split.addWidget(self.tabs)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.setCollapsible(0, False)
+        self.split.setCollapsible(1, False)
+        state = settings().value("window/split")
+        if state is None or not self.split.restoreState(state):
+            self.split.setSizes([1100, 400])
+        self.split.splitterMoved.connect(
+            lambda *_: settings().setValue("window/split", self.split.saveState()))
+        self.setCentralWidget(self.split)
 
     def _build_sync_tab(self):
         page, pv = _tab_page()
@@ -1352,14 +1370,19 @@ class MainWindow(QtWidgets.QMainWindow):
                            "affect rendered videos.", small=True))
         self.decode_pick = QtWidgets.QComboBox()
         self.decode_pick.setFocusPolicy(QtCore.Qt.ClickFocus)
-        for key, (label, _v) in PREVIEW_DECODE.items():
-            if key == "t_nvdec_copy":
-                self.decode_pick.insertSeparator(self.decode_pick.count())
-            self.decode_pick.addItem(label, key)
-        cur = settings().value("preview/decode", DEFAULT_PREVIEW_DECODE)
-        self.decode_pick.setCurrentIndex(max(0, self.decode_pick.findData(cur)))
+        self._fill_decode_pick()
         self.decode_pick.currentIndexChanged.connect(self._decode_changed)
         vl.addWidget(self.decode_pick)
+        self.decode_lbl = _note("", small=True)
+        vl.addWidget(self.decode_lbl)
+        self.adv_box = _check(
+            "Show advanced options",
+            settings().value("preview/advanced", False, type=bool),
+            self._toggle_advanced)
+        vl.addWidget(self.adv_box)
+        self.adv_widget = QtWidgets.QWidget()
+        al = QtWidgets.QVBoxLayout(self.adv_widget)
+        al.setContentsMargins(0, 0, 0, 0)
         mrow = QtWidgets.QHBoxLayout()
         mrow.addWidget(QtWidgets.QLabel("Player window:"))
         self.mode_pick = QtWidgets.QComboBox()
@@ -1378,14 +1401,15 @@ class MainWindow(QtWidgets.QMainWindow):
             "player (fixes striped GPU preview on some NVIDIA setups).\n"
             "Embedded: the older way. Restart to apply.")
         mrow.addWidget(self.mode_pick, 1)
-        vl.addLayout(mrow)
-        self.decode_lbl = _note("", small=True)
-        vl.addWidget(self.decode_lbl)
-        vl.addWidget(_note("If the preview shows stripes or blocky glitches, "
-                           "try the Test options to find a GPU decoder that "
-                           "works on your machine, or use Off. If a Test "
-                           "option can't start, it quietly uses the CPU "
-                           "(check the line above).", small=True))
+        al.addLayout(mrow)
+        al.addWidget(_note("If the preview shows stripes or blocky glitches, "
+                           "try the Test decoders (listed in the menu above "
+                           "while this is on) to find one that works on your "
+                           "machine, or use Off. A Test decoder that can't "
+                           "start quietly uses the CPU (check \"Decoding "
+                           "with\").", small=True))
+        vl.addWidget(self.adv_widget)
+        self.adv_widget.setVisible(self.adv_box.isChecked())
         pv.addWidget(vbox)
 
         abox, al2 = _group("About")
@@ -1628,8 +1652,10 @@ class MainWindow(QtWidgets.QMainWindow):
     # ======================================================= refreshes ===
 
     def _refresh_all(self):
-        def elide(p):
-            return Path(p).name if p else "<i>none</i>"
+        def elide(p):  # zero-width spaces let long names wrap in the panel
+            if not p:
+                return "<i>none</i>"
+            return html.escape(re.sub(r"([_\-.])", "\\1\u200b", Path(p).name))
         vtxt = elide(self.video_path)
         if len(self.parts) > 1:
             vtxt += f" <small>+{len(self.parts) - 1} more</small>"
@@ -2072,6 +2098,28 @@ class MainWindow(QtWidgets.QMainWindow):
             add_menu_entry(p)
         self._menu_refresh()
 
+    def _fill_decode_pick(self):
+        """Basic choices always; Test decoders only with advanced options on
+        (or when one is the current setting, so it stays visible)."""
+        adv = settings().value("preview/advanced", False, type=bool)
+        cur = settings().value("preview/decode", DEFAULT_PREVIEW_DECODE)
+        p = self.decode_pick
+        p.blockSignals(True)
+        p.clear()
+        for key, (label, _v) in PREVIEW_DECODE.items():
+            if key.startswith("t_") and not (adv or key == cur):
+                continue
+            if key.startswith("t_") and p.findData("off") == p.count() - 1:
+                p.insertSeparator(p.count())
+            p.addItem(label, key)
+        p.setCurrentIndex(max(0, p.findData(cur)))
+        p.blockSignals(False)
+
+    def _toggle_advanced(self, on: bool):
+        settings().setValue("preview/advanced", on)
+        self.adv_widget.setVisible(on)
+        self._fill_decode_pick()
+
     def _decode_changed(self, _i=None):
         key = self.decode_pick.currentData()
         settings().setValue("preview/decode", key)
@@ -2433,10 +2481,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.fps_pick.blockSignals(True)
         self.fps_pick.clear()
-        self.fps_pick.addItem(f"Source ({info.fps:.2f})", 0.0)
+        hi = info.fps > 61
+        self.fps_pick.addItem(f"Source: {info.fps:.2f} fps"
+                              + (" (slower render)" if hi else ""), 0.0)
         for f in (60, 30, 24):
             if f < info.fps - 0.5:
-                self.fps_pick.addItem(f"{f}", float(f))
+                self.fps_pick.addItem(f"{f} fps" + (" (recommended)" if hi and f == 60
+                                                    else ""), float(f))
+        self.fps_pick.setToolTip(
+            "Source keeps every frame of the camera's frame rate. Above 60 fps "
+            "it takes about twice as long to render per extra 60 fps, and most "
+            "screens show 60 at most.")
         want = float(st.value("export/fps", -1))
         if want < 0:  # first time: cap high-speed sources at 60
             want = 60.0 if info.fps > 61 else 0.0

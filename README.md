@@ -160,6 +160,9 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v0.9.9 — 1.0 candidate. Side panel fits on any screen and is resizable;
+advanced preview options tucked away; clearer frame-rate choices.
+
 v0.9.8 — fixes garbage in the empty preview area before a video is opened.
 
 v0.9.7 — clean GPU preview on NVIDIA/KDE Wayland: native player window drawn
