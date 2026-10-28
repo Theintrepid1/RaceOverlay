@@ -4,6 +4,8 @@
 - (add ideas here)
 
 ## Done
+- **v1.0.0** (2026-10-28): first release. v0.9.9 confirmed on Cam's NVIDIA
+  desktop (CachyOS, KDE Wayland) and Intel laptop.
 - v0.9.9: side panel no longer clips (long filenames wrap, dropdowns don't size
   to their longest item, panel resizable, window fits the screen); Test
   decoders and Player window behind "Show advanced options"; clearer frame
@@ -29,11 +31,10 @@
 - v0.9.1: preview decoding setting (safe copy default) + NVDEC; fixes striped
   preview on NVIDIA with the VA-API wrapper
 
-## Before 1.0
-- Diagnose system-mpv startup crash on CachyOS (only if system mpv is worth keeping)
-- Real-session testing on Cam's machine (AppImage, GPU decode/encode)
+## Open items carried past 1.0
 - License decision (GPL-3.0 recommended; bundles GPL ffmpeg/mpv)
 - Older-distro AppImage build if a teammate needs it (Ubuntu 22.04 / Debian 12)
+- System-mpv startup crash on CachyOS (only matters if the opt-in is kept)
 
 ## Planned, not scheduled
 - Start/finish line from GPS (laps for files without a lap channel; fix bad markers)
