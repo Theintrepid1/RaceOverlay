@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Entry point for the packaged (AppImage) build.
 
 One executable does three jobs:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Video sources: GoPro chapter detection, multi-file "virtual" merges,
 probing, lossless merge-to-file, and hardware encoder detection."""
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Segmented, parallel, resumable renderer.
 
 The export is cut into ~20 s segments. Worker processes (one per core by

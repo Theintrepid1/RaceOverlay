@@ -224,3 +224,13 @@ per channel, `--g-rotate` now overrides auto-detected named g columns,
 
 Later, RPM/throttle gauges when OBD
 present, gauge layout/theme config, multi-file (chaptered) sessions.
+
+## License
+Race Overlay is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed WITHOUT ANY WARRANTY; see [LICENSE](LICENSE).
+
+The AppImage bundles FFmpeg (GPL), mpv (GPL), Qt (LGPL) and other components;
+see [packaging/NOTICE.txt](packaging/NOTICE.txt). Anyone you give the AppImage
+to is entitled to the source code, including this repository's.

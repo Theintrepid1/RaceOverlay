@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Compose gauge overlays onto a source video via a single streaming ffmpeg.
 
 Python generates one RGBA frame per output frame and pipes raw bytes into

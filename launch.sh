@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Starts the Race Overlay sync GUI. Used by the desktop launcher; also fine to
 # run directly. Any arguments (e.g. a video path) are passed through.
 DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"

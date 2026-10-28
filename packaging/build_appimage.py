@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Build RaceOverlay-x86_64.AppImage.
 
 Needs: pyinstaller, patchelf, appimagetool, a shared ffmpeg build (BtbN
@@ -233,6 +235,7 @@ def main():
     lic = appdir / "usr" / "share" / "licenses" / "raceoverlay"
     lic.mkdir(parents=True)
     shutil.copy2(a.ffmpeg / "LICENSE.txt", lic / "FFmpeg-LICENSE.txt")
+    shutil.copy2(ROOT / "LICENSE", lic / "LICENSE")
     for f in ("NOTICE.txt",):
         p = ROOT / "packaging" / f
         if p.exists():

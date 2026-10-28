@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Lap timing, distance-matched delta, and corner detection.
 
 Laps come from the logger's lap channel. The first lap (logger power-up to

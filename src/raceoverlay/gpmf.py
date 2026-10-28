@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Minimal GoPro GPMF telemetry reader.
 
 Extracts the `gpmd` data track with ffmpeg and decodes the KLV payloads to get

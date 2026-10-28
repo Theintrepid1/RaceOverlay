@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Race Overlay: line telemetry up with video, style the overlay, render.
 
 One window. Video (mpv rendering straight into a Qt OpenGL widget) with a
@@ -1413,7 +1415,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(vbox)
 
         abox, al2 = _group("About")
-        al2.addWidget(_note(f"Race Overlay {__version__}", small=True))
+        al2.addWidget(_note(f"Race Overlay {__version__}<br>"
+                            "Free software under the GNU GPL v3 or later. "
+                            "No warranty.", small=True))
         pv.addWidget(abox)
 
         kbox, kl = _group("Keys")

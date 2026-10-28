@@ -1,3 +1,6 @@
+Race Overlay is licensed under the GNU GPL version 3 or later (see
+LICENSE). Source: https://github.com/Theintrepid1/RaceOverlay
+
 Race Overlay bundles third-party software:
 
 - FFmpeg 8.1 (BtbN linux64 GPL shared build), licensed under the GNU GPL

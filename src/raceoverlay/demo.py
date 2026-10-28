@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Generate synthetic telemetry + a test clip so the pipeline can be demoed
 without a real recording."""
 from __future__ import annotations

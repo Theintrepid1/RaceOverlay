@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Adds "Race Overlay" to your app menu (and "Open With" for videos).
 # Re-run it if you move the project folder.
 set -e

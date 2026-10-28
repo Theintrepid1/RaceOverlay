@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Overlay gauges: style presets, a movable layout, and the drawing code.
 
 Every gauge lives in a box whose position is stored as a fraction of the frame

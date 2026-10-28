@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Bundle setup for the packaged (AppImage) build.
 
 Runs as a PyInstaller runtime hook: before PyInstaller's own hooks import
