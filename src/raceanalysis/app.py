@@ -69,6 +69,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._sync_job: dict | None = None
         self._popouts: dict[str, PopOut] = {}
         self._pending = False
+        self._loop: tuple[float, float] | None = None   # metres along the reference
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1680, int(avail.width() * 0.96)),
                     min(1040, int(avail.height() * 0.94)))
@@ -242,6 +243,29 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._show_page(page)
         page.show_turn(n)
 
+    def set_loop(self, span):
+        """Loop the video over span (metres along the reference) on the focus
+        lap, or stop looping (None). A new loop starts playing."""
+        new = span is not None and span != self._loop
+        self._loop = span
+        self._apply_ab()
+        if new and self._loop_vt is not None and self.videop.isVisible():
+            self.videop.seek(self._loop_vt[0])
+            self.videop.play()
+
+    _loop_vt = None
+
+    def _apply_ab(self):
+        """Turn the loop into video times for the lap the video follows."""
+        self._loop_vt = None
+        ld = self.focus_lap()
+        v = self._session_video(ld) if ld is not None else None
+        if self._loop is not None and v and self.a.ref is not None:
+            t0, t1 = (ld.lap.start + self.a.time_at(ld, d) - v[1] for d in self._loop)
+            if t1 > t0 and t0 >= 0 and (not self._duration or t1 <= self._duration):
+                self._loop_vt = (t0, t1)
+        self.videop.set_ab(self._loop_vt)
+
     def zoom(self, d0, d1):
         self._page(LapsPage).zoom(d0, d1)
 
@@ -266,6 +290,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         for p in self.pages:
             p.laps_changed()
         self._load_video()
+        self._apply_ab()
         self.set_cursor(self.cursor_d)
 
     def _fill_pickers(self):
@@ -285,7 +310,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
     def _sync_pickers(self):
         for cb, key in ((self.lap_pick, self.focus),
                         (self.ref_pick, self.a.ref.key if self.a.ref else None)):
-            i = cb.findData(key)
+            # findData compares Python tuples by identity, so match by value
+            i = next((j for j in range(cb.count()) if cb.itemData(j) == key), -1)
             cb.blockSignals(True)
             cb.setCurrentIndex(i)
             cb.blockSignals(False)
@@ -311,6 +337,12 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.btn_video.blockSignals(False)
         self.act_video.setChecked(on)
         self.videop.setVisible(on)
+        # only the Corners tab loops the video
+        corners = self._page(CornersPage)
+        if page is corners:
+            corners._apply_loop()
+        elif corners.title not in self._popouts:
+            self.set_loop(None)
 
     def _set_video_visible(self, on: bool):
         page = self.tabs.currentWidget()
@@ -430,6 +462,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         except Exception:
             self._duration = 0.0
         self.videop.load(media.mpv_url(parts))
+        QtCore.QTimer.singleShot(500, self._apply_ab)
         QtCore.QTimer.singleShot(400, lambda: self.set_cursor(self.cursor_d, seek=True))
 
     def _session_video(self, ld):

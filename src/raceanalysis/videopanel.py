@@ -227,6 +227,26 @@ class VideoPanel(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def play(self):
+        try:
+            self.player.pause = False
+        except Exception:
+            pass
+
+    def set_ab(self, span):
+        """Loop between two video times, or stop looping (None)."""
+        try:
+            if span is None:
+                self.player["ab-loop-a"] = "no"
+                self.player["ab-loop-b"] = "no"
+                self.status.setText("")
+            else:
+                self.player["ab-loop-a"] = f"{span[0]:.3f}"
+                self.player["ab-loop-b"] = f"{span[1]:.3f}"
+                self.status.setText(f"Looping {span[1] - span[0]:.1f} s")
+        except Exception:
+            pass
+
     def pause(self):
         try:
             self.player.pause = True

@@ -24,7 +24,7 @@ class CornersPage(QtWidgets.QWidget):
     def __init__(self, win):
         super().__init__()
         self.win = win
-        self.turn: int | None = None   # turn picked (shown alone on the g-g)
+        self.turns: list[int] = []     # turns picked (a series loops on the video)
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -43,14 +43,26 @@ class CornersPage(QtWidgets.QWidget):
         self.sort.setCurrentIndex(max(0, i))
         self.sort.currentIndexChanged.connect(self._sort_changed)
         row.addWidget(self.sort)
+        row.addSpacing(16)
+        self.loop = QtWidgets.QCheckBox("Loop the video on picked turns")
+        self.loop.setToolTip("Plays the picked turn (or run of turns) over and over, so you can "
+                             "watch the dot trace the g-g. Shift-click to pick a run of turns.")
+        self.loop.setChecked(settings().value("analysis/corner_loop", True, type=bool))
+        self.loop.toggled.connect(self._loop_toggled)
+        row.addWidget(self.loop)
         row.addStretch(1)
+        self.btn_all = QtWidgets.QPushButton("Whole lap")
+        self.btn_all.setToolTip("Clear the picked turns")
+        self.btn_all.clicked.connect(self.clear_turns)
+        row.addWidget(self.btn_all)
         ll.addLayout(row)
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
-        self.table.cellClicked.connect(self._clicked)
+        self.table.itemSelectionChanged.connect(self._selection_changed)
+        self._filling = False
         ll.addWidget(self.table, 1)
         split.addWidget(left)
 
@@ -68,14 +80,15 @@ class CornersPage(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ updates
     def refresh(self):
-        if self.turn is not None and not any(c.n == self.turn for c in self.win.a.corners):
-            self.turn = None
+        have = {c.n for c in self.win.a.corners}
+        self.turns = [n for n in self.turns if n in have]
         self.laps_changed()
 
     def laps_changed(self):
         self._fill()
         self._draw_gg()
         self.cursor(self.win.cursor_d)
+        self._apply_loop()
 
     def cursor(self, d: float):
         w, a = self.win, self.win.a
@@ -87,16 +100,20 @@ class CornersPage(QtWidgets.QWidget):
 
     def show_turn(self, n: int):
         """Pick turn n (from the Overview's biggest losses)."""
-        self.turn = None
-        for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it is not None and it.data(QtCore.Qt.UserRole) == n:
-                self.table.selectRow(r)
-                self._clicked(r, 0)
-                return
+        self._pick([n], jump=True)
+
+    def clear_turns(self):
+        self._pick([], jump=False)
 
     # ------------------------------------------------------------ table
     def _fill(self):
+        self._filling = True
+        try:
+            self._fill_rows()
+        finally:
+            self._filling = False
+
+    def _fill_rows(self):
         w, a, t = self.win, self.win.a, self.table
         t.setRowCount(0)
         ld = w.focus_lap()
@@ -148,8 +165,7 @@ class CornersPage(QtWidgets.QWidget):
                 if col > 0:
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(r, col, it)
-            if c.n == self.turn:
-                t.selectRow(r)
+        self._select_rows()
         t.resizeColumnsToContents()
 
     def _sorted(self, res):
@@ -171,24 +187,61 @@ class CornersPage(QtWidgets.QWidget):
         settings().setValue("analysis/corner_sort", self.sort.currentData())
         self._fill()
 
-    def _clicked(self, row, _col):
-        it = self.table.item(row, 0)
-        if it is None:
+    def _select_rows(self):
+        t = self.table
+        was = self._filling
+        self._filling = True
+        t.clearSelection()
+        sm = t.selectionModel()
+        for r in range(t.rowCount()):
+            it = t.item(r, 0)
+            if it is not None and it.data(QtCore.Qt.UserRole) in self.turns:
+                sm.select(t.model().index(r, 0), QtCore.QItemSelectionModel.Select
+                          | QtCore.QItemSelectionModel.Rows)
+        self._filling = was
+
+    def _selection_changed(self):
+        if self._filling:
             return
-        n = it.data(QtCore.Qt.UserRole)
-        c = next((c for c in self.win.a.corners if c.n == n), None)
-        if c is None:
-            return
-        # clicking the turn already shown goes back to the whole lap
-        self.turn = None if self.turn == n else n
+        rows = {i.row() for i in self.table.selectionModel().selectedRows()}
+        ns = [self.table.item(r, 0).data(QtCore.Qt.UserRole) for r in sorted(rows)]
+        # defer: never redraw from inside the table's own click
+        QtCore.QTimer.singleShot(0, lambda: self._pick(ns, jump=True, from_table=True))
+
+    def _picked(self):
+        """Picked corners in track order, and the stretch they cover."""
+        cs = sorted((c for c in self.win.a.corners if c.n in self.turns),
+                    key=lambda c: c.start_d)
+        if not cs:
+            return cs, None
+        return cs, (cs[0].start_d, max(c.end_d for c in cs))
+
+    def _pick(self, ns, jump: bool, from_table: bool = False):
+        self.turns = list(ns)
+        if not from_table:
+            self._select_rows()
         self._draw_gg()
-        if self.turn is None:
-            self.table.clearSelection()
-            self.win.zoom(None, None)
+        cs, span = self._picked()
+        w = self.win
+        if span is None:
+            w.set_loop(None)
+            w.zoom(None, None)
+            self.cursor(w.cursor_d)
             return
-        # land on the approach so the video shows the braking zone
-        self.win.set_cursor(max(c.start_d, c.apex_d - 250.0), seek=True)
-        self.win.zoom(c.start_d, c.end_d)
+        d0, d1 = span
+        w.zoom(d0, d1)
+        self._apply_loop()
+        if jump:
+            # land on the approach so the video shows the braking zone
+            w.set_cursor(max(d0, cs[0].apex_d - 250.0), seek=True)
+
+    def _apply_loop(self):
+        _cs, span = self._picked()
+        self.win.set_loop(span if span is not None and self.loop.isChecked() else None)
+
+    def _loop_toggled(self, on):
+        settings().setValue("analysis/corner_loop", on)
+        self._apply_loop()
 
     # --------------------------------------------------------------- g-g
     def _draw_gg(self):
@@ -216,28 +269,26 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.plot(o[:, 0], o[:, 1], pen=pg.mkPen(REF_COLOR, width=2,
                                                         style=QtCore.Qt.DashLine))
         ld = w.focus_lap() or a.ref
-        c = next((c for c in a.corners if c.n == self.turn), None)
+        cs, span = self._picked()
         for lap, col, size in ((a.ref, REF_COLOR, 3), (ld if ld is not a.ref else None, None, 4)):
             if lap is None or lap.lat_g is None or lap.lon_g is None:
                 continue
             col = col or w.color(lap.key)
             q = QtGui.QColor(col)
             fast = lap.v > 30
-            if c is None:
+            if span is None:
                 alpha = 70 if lap is a.ref and ld is not a.ref else 170
                 self.gg.plot(lap.lat_g[fast], lap.lon_g[fast], pen=None, symbol="o",
                              symbolSize=size, symbolPen=None,
                              symbolBrush=pg.mkBrush(q.red(), q.green(), q.blue(), alpha))
             else:
-                inside = fast & (lap.d >= c.start_d) & (lap.d <= c.end_d)
-                self.gg.plot(lap.lat_g[fast & ~inside], lap.lon_g[fast & ~inside], pen=None,
-                             symbol="o", symbolSize=3, symbolPen=None,
-                             symbolBrush=pg.mkBrush(120, 120, 115, 40))
+                inside = fast & (lap.d >= span[0]) & (lap.d <= span[1])
                 self.gg.plot(lap.lat_g[inside], lap.lon_g[inside], pen=pg.mkPen(col, width=1.2),
                              symbol="o", symbolSize=size + 2, symbolPen=None,
                              symbolBrush=pg.mkBrush(col))
-        if c is not None:
-            t = pg.TextItem(f"{c.name}: this lap vs reference (grey)", color="#d8d7d0",
+        if cs:
+            names = cs[0].name if len(cs) == 1 else f"{cs[0].name}–{cs[-1].name}"
+            t = pg.TextItem(f"{names}: this lap vs reference (grey)", color="#d8d7d0",
                             anchor=(0, 0))
             t.setPos(-1.6, 1.6)
             self.gg.addItem(t)
