@@ -9,7 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from raceoverlay.syncgui import _note
+from raceoverlay.syncgui import _note, settings
 
 from ..common import CURSOR, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
 
@@ -17,6 +17,9 @@ from ..common import CURSOR, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
 class CornersPage(QtWidgets.QWidget):
     title = "Corners & grip"
     video_default = True
+    SORTS = [("Track order", "track"), ("Most time lost", "lost"),
+             ("Most time gained", "gained"), ("Least grip used", "grip"),
+             ("Furthest from best anyone", "best")]
 
     def __init__(self, win):
         super().__init__()
@@ -31,6 +34,17 @@ class CornersPage(QtWidgets.QWidget):
         ll.setContentsMargins(0, 0, 0, 0)
         self.caption = _note("")
         ll.addWidget(self.caption)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Sort"))
+        self.sort = QtWidgets.QComboBox()
+        for txt, key in self.SORTS:
+            self.sort.addItem(txt, key)
+        i = self.sort.findData(settings().value("analysis/corner_sort", "track"))
+        self.sort.setCurrentIndex(max(0, i))
+        self.sort.currentIndexChanged.connect(self._sort_changed)
+        row.addWidget(self.sort)
+        row.addStretch(1)
+        ll.addLayout(row)
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -96,7 +110,7 @@ class CornersPage(QtWidgets.QWidget):
             self.caption.setText("Pick a lap other than the reference (top bar) to see where "
                                  "it gained or lost time.")
             return
-        res = sorted(a.corner_results(ld), key=lambda r: -r.lost)
+        res = self._sorted(a.corner_results(ld))
         named = a.profile is not None and a.profile.turns
         self.caption.setText(
             f"<b>{w.name(ld)}</b> vs reference: {fmt_gap(ld.time - a.ref.time)} s. "
@@ -137,6 +151,25 @@ class CornersPage(QtWidgets.QWidget):
             if c.n == self.turn:
                 t.selectRow(r)
         t.resizeColumnsToContents()
+
+    def _sorted(self, res):
+        how = self.sort.currentData()
+        if how == "lost":
+            return sorted(res, key=lambda r: -r.lost)
+        if how == "gained":
+            return sorted(res, key=lambda r: r.lost)
+        if how == "grip":
+            def used(r):
+                g = r.grip
+                return g.used if g is not None and g.used is not None else 9.0
+            return sorted(res, key=used)
+        if how == "best":
+            return sorted(res, key=lambda r: r.best_lost - r.lost)
+        return sorted(res, key=lambda r: r.corner.start_d)
+
+    def _sort_changed(self, _i):
+        settings().setValue("analysis/corner_sort", self.sort.currentData())
+        self._fill()
 
     def _clicked(self, row, _col):
         it = self.table.item(row, 0)
