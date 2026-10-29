@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from racecore import telemetry  # noqa: E402
+from racecore import gosync, ingest, telemetry  # noqa: E402
 
 from . import gauges  # noqa: E402  (Qt imported in main/below)
 
@@ -823,6 +823,290 @@ class MergeDialog(QtWidgets.QDialog):
         self.accept()
 
 
+def _pick_dir(parent, title: str, start: str) -> str | None:
+    d = QtWidgets.QFileDialog.getExistingDirectory(
+        parent, title, start if start and os.path.isdir(start) else str(Path.home()))
+    return d or None
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1e9:
+        return f"{n / 1e9:.1f} GB"
+    return f"{n / 1e6:.0f} MB" if n >= 1e7 else f"{n / 1e6:.1f} MB"
+
+
+class ImportDialog(QtWidgets.QDialog):
+    """Copy recordings off a GoPro card and pair each with its logger file.
+
+    Work runs on a thread; a timer moves its results onto the UI. On
+    "Open", `self.result` = (chapter paths, csv path or None, offset or None,
+    confident).
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Import from GoPro card")
+        self.resize(640, 560)
+        s = settings()
+        self.result = None
+        self._job: dict | None = None
+        self._pairs: list = []
+        lay = QtWidgets.QVBoxLayout(self)
+
+        crow = QtWidgets.QHBoxLayout()
+        crow.addWidget(QtWidgets.QLabel("Card"))
+        self.card_pick = QtWidgets.QComboBox()
+        self.card_pick.currentIndexChanged.connect(self._scan)
+        crow.addWidget(self.card_pick, 1)
+        crow.addWidget(_btn("Refresh", self._find_cards))
+        crow.addWidget(_btn("Folder…", self._choose_card,
+                            "Use a folder instead (a copied card, a card reader "
+                            "that didn't show up)"))
+        lay.addLayout(crow)
+
+        lay.addWidget(_note("Recordings (newest first). Chapters stay as "
+                            "separate files so the GoPro sensor track is kept.",
+                            small=True))
+        self.lst = QtWidgets.QListWidget()
+        lay.addWidget(self.lst, 1)
+
+        form = QtWidgets.QFormLayout()
+        self.lib_edit = QtWidgets.QLineEdit(s.value(
+            "import/library", str(Path.home() / "Videos" / "Track Days")))
+        self.log_edit = QtWidgets.QLineEdit(s.value(
+            "import/logs", s.value("dir/csv", "") or str(Path.home() / "Downloads")))
+        for edit, title, key in ((self.lib_edit, "Copy videos to", "lib"),
+                                 (self.log_edit, "Data files in", "logs")):
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(_btn("…", lambda _=False, e=edit, t=title: self._browse(e, t)))
+            form.addRow(title, row)
+        self.lib_edit.editingFinished.connect(self._scan)
+        lay.addLayout(form)
+        lay.addWidget(_note("Videos go into a folder per day (e.g. 2026-09-27). "
+                            "Nothing on the card is changed. Data files (APEX "
+                            "Pro CSVs) are matched to each video by syncing "
+                            "against them.", small=True))
+
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setVisible(False)
+        lay.addWidget(self.bar)
+        self.msg = _note("")
+        lay.addWidget(self.msg)
+
+        brow = QtWidgets.QHBoxLayout()
+        self.btn_import = _btn("Import and match", self._start_import, big=True)
+        self.btn_open = _btn("Open selected", self._open, big=True)
+        self.btn_open.setVisible(False)
+        self.btn_cancel = _btn("Cancel", self._cancel)
+        self.btn_cancel.setVisible(False)
+        close = _btn("Close", self.reject)
+        brow.addWidget(self.btn_import, 1)
+        brow.addWidget(self.btn_open, 1)
+        brow.addWidget(self.btn_cancel)
+        brow.addWidget(close)
+        lay.addLayout(brow)
+
+        self.timer = QtCore.QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(100)
+        self._find_cards()
+
+    # ---------------------------------------------------------------- cards
+    def _find_cards(self):
+        self.card_pick.blockSignals(True)
+        self.card_pick.clear()
+        for c in ingest.find_cards():
+            self.card_pick.addItem(c.label, c.root)
+        last = settings().value("import/card", "")
+        if last and os.path.isdir(last) and self.card_pick.findData(last) < 0 \
+                and ingest.is_card(last):
+            self.card_pick.addItem(Path(last).name, last)
+        self.card_pick.blockSignals(False)
+        if self.card_pick.count() == 0:
+            self.lst.clear()
+            self.msg.setText("No GoPro card found. Put the card in a reader "
+                             "(it should open as a drive), then press Refresh, "
+                             "or pick a folder.")
+        else:
+            self._scan()
+
+    def _choose_card(self):
+        d = _pick_dir(self, "Folder with GoPro files", settings().value("import/card", ""))
+        if not d:
+            return
+        if self.card_pick.findData(d) < 0:
+            self.card_pick.addItem(Path(d).name or d, d)
+        self.card_pick.setCurrentIndex(self.card_pick.findData(d))
+        self._scan()
+
+    def _browse(self, edit, title):
+        d = _pick_dir(self, title, edit.text())
+        if d:
+            edit.setText(d)
+            self._scan()
+
+    def _scan(self):
+        root = self.card_pick.currentData()
+        if not root or self._busy():
+            return
+        self.lst.clear()
+        self.msg.setText("Reading the card…")
+        lib = self.lib_edit.text().strip()
+        self._run("scan", lambda job: ingest.scan_clips(root, lib or None))
+
+    # ----------------------------------------------------------------- work
+    def _busy(self) -> bool:
+        return self._job is not None and not self._job.get("done")
+
+    def _run(self, kind, fn):
+        job = {"kind": kind, "done": False, "value": None, "error": None,
+               "progress": None, "cancel": False}
+        self._job = job
+
+        def work():
+            try:
+                job["value"] = fn(job)
+            except InterruptedError:
+                job["error"] = "cancelled"
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                job["error"] = str(e)
+            job["done"] = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cancel(self):
+        if self._job:
+            self._job["cancel"] = True
+            self.msg.setText("Stopping…")
+
+    def _poll(self):
+        job = self._job
+        if job is None:
+            return
+        p = job.get("progress")
+        if p and not job["done"]:
+            done, total, text = p
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(1000 * done / max(total, 1)))
+            self.msg.setText(text)
+        if not job["done"]:
+            return
+        self._job = None
+        self.bar.setVisible(False)
+        self.btn_cancel.setVisible(False)
+        self.btn_import.setEnabled(True)
+        if job["error"]:
+            self.msg.setText("Cancelled. Files copied so far are kept."
+                             if job["error"] == "cancelled" else
+                             f"Stopped: {job['error']}")
+            return
+        if job["kind"] == "scan":
+            self._show_clips(job["value"])
+        else:
+            self._show_pairs(job["value"])
+
+    def _show_clips(self, clips):
+        self.lst.clear()
+        for c in clips:
+            when = c.recorded.strftime("%a %b %d  %H:%M") if c.recorded else "date unknown"
+            dur = fmt_t(c.duration).split(".")[0] if c.duration else "?"
+            parts = f"{len(c.chapters)} files" if len(c.chapters) > 1 else "1 file"
+            tag = "   ✓ already imported" if c.imported else ""
+            it = QtWidgets.QListWidgetItem(
+                f"{c.name}   {when}   {dur}   {parts}, {_fmt_size(c.size)}{tag}")
+            it.setData(QtCore.Qt.UserRole, c)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Unchecked if c.imported else QtCore.Qt.Checked)
+            it.setToolTip("\n".join(c.chapters))
+            self.lst.addItem(it)
+        n = sum(1 for c in clips if not c.imported)
+        self.msg.setText(f"{len(clips)} recordings, {n} new." if clips else
+                         "No GoPro recordings on this card.")
+
+    def _start_import(self):
+        if self._busy():
+            return
+        clips = [self.lst.item(i).data(QtCore.Qt.UserRole) for i in range(self.lst.count())
+                 if self.lst.item(i).checkState() == QtCore.Qt.Checked]
+        lib, logdir = self.lib_edit.text().strip(), self.log_edit.text().strip()
+        if not clips:
+            self.msg.setText("Tick at least one recording.")
+            return
+        if not lib:
+            self.msg.setText("Pick where to copy the videos.")
+            return
+        need = sum(c.size for c in clips)
+        try:
+            Path(lib).mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(lib).free
+        except OSError as e:
+            self.msg.setText(f"Can't use {lib}: {e}")
+            return
+        if need > free:
+            self.msg.setText(f"Not enough space in {lib}: need {_fmt_size(need)}, "
+                             f"{_fmt_size(free)} free.")
+            return
+        s = settings()
+        s.setValue("import/library", lib)
+        s.setValue("import/logs", logdir)
+        s.setValue("import/card", self.card_pick.currentData() or "")
+        self.btn_import.setEnabled(False)
+        self.btn_cancel.setVisible(True)
+        self.btn_open.setVisible(False)
+        self.bar.setVisible(True)
+
+        def work(job):
+            def prog(done, total, name):
+                job["progress"] = (done, total, f"Copying {name}  "
+                                   f"({_fmt_size(done)} of {_fmt_size(total)})")
+            stop = lambda: job["cancel"]  # noqa: E731
+            copied = ingest.import_clips(clips, lib, progress=prog, cancelled=stop)
+            logs = ingest.find_logs(logdir) if logdir else []
+            out = []
+            for i, (clip, paths) in enumerate(zip(clips, copied)):
+                job["progress"] = (i, len(clips),
+                                   f"Matching {clip.name} to a data file…")
+                info = media.probe(paths)
+                parts = [(p.path, p.start) for p in info.parts]
+                pr = ingest.pair(clip, parts, logs, cancelled=stop)
+                out.append((paths, pr))
+            return out
+        self._run("import", work)
+
+    def _show_pairs(self, results):
+        self._pairs = results
+        self.lst.clear()
+        for paths, pr in results:
+            if pr.log:
+                txt = (f"{pr.clip.name}  →  {Path(pr.log.path).name}\n"
+                       f"      match {pr.score:.0%}, offset {pr.offset:+.2f} s")
+            elif pr.score is not None:
+                txt = (f"{pr.clip.name}  →  no confident match\n"
+                       f"      best {pr.score:.0%}; open a data file and sync by hand")
+            else:
+                txt = f"{pr.clip.name}  →  {pr.note}"
+            it = QtWidgets.QListWidgetItem(txt)
+            it.setData(QtCore.Qt.UserRole, (paths, pr))
+            it.setToolTip("\n".join(paths))
+            self.lst.addItem(it)
+        if results:
+            self.lst.setCurrentRow(0)
+        ok = sum(1 for _, pr in results if pr.log)
+        self.msg.setText(f"Imported {len(results)} recording(s); matched {ok} "
+                         f"to a data file. Pick one and open it.")
+        self.btn_open.setVisible(bool(results))
+        self.btn_import.setVisible(False)
+
+    def _open(self):
+        it = self.lst.currentItem()
+        if it is None:
+            return
+        paths, pr = it.data(QtCore.Qt.UserRole)
+        self.result = (paths, pr.log.path if pr.log else None,
+                       pr.offset if pr.log else None, bool(pr.log))
+        self.accept()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -859,6 +1143,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._proc_buf = ""
         self._hw = None
         self._hw_applied = False
+        self._autosync_busy = False
+        self._autosync_res = None  # set by the auto-sync thread, read in _tick
         threading.Thread(target=self._detect_hw, daemon=True).start()
         self._proc_err = ""
         self._ovl_key = None
@@ -998,6 +1284,9 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(_btn("Open…", self._choose_csv), 1, 2)
         grid.setColumnStretch(1, 1)
         fl.addLayout(grid)
+        fl.addWidget(_btn("Import from GoPro card…", self._import_dialog,
+                          "Copy new recordings off the card into a folder per "
+                          "track day, match each to its data file, and sync"))
         mrow = QtWidgets.QHBoxLayout()
         mrow.addWidget(_btn("Merge files…", self._merge_dialog,
                             "Play several video files as one (GoPro chapters, "
@@ -1014,6 +1303,14 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(self.state_lbl)
 
         box1, l1 = _group("1 · Line it up")
+        self.btn_autosync = _btn(
+            "Auto-sync from GoPro sensors", self._auto_sync,
+            "Match the camera's accelerometer against the data file's g-forces "
+            "(works with the GoPro's GPS off)", big=True)
+        l1.addWidget(self.btn_autosync)
+        l1.addWidget(_note(
+            "Needs the original GoPro files: merged or re-encoded videos lose "
+            "the sensor track. Or line it up by hand:", small=True))
         l1.addWidget(_note(
             "Scrub the video to where the car crosses the start/finish line "
             "and pause. Pick which lap is starting, then click Sync here."))
@@ -1547,6 +1844,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 return chapters
         return [path]
 
+    def _import_dialog(self):
+        dlg = ImportDialog(self)
+        if not dlg.exec() or not dlg.result:
+            return
+        parts, csv, offset, confident = dlg.result
+        self.open_video(parts[0], parts=parts)
+        if csv:
+            self.open_csv(csv)
+        if csv and offset is not None and confident and self.telem is not None:
+            self._set_offset(offset, from_spin=False)
+            self._mark_synced(f"Imported and auto-synced to {Path(csv).name} "
+                              f"(offset {offset:+.2f} s). Check a braking zone "
+                              "to be sure.")
+        elif not csv:
+            self._set_status("Imported. No data file matched: open one and "
+                             "use Auto-sync or line it up by hand.")
+
     def _merge_dialog(self):
         dlg = MergeDialog(self, self.parts)
         if dlg.exec() and dlg.files:
@@ -1823,6 +2137,78 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_offset(start - self._vt(), from_spin=False)
         self._mark_synced(f"Synced to the start of lap {n}. Play a braking "
                           "zone and fine-tune if needed.")
+
+    # ======================================================== auto-sync ===
+
+    def _auto_sync(self):
+        if not self._ready() or self._autosync_busy:
+            return
+        if self.telem.channels.get("lon_g") is None or \
+                self.telem.channels.get("lat_g") is None:
+            self._set_status("Auto-sync needs g-force data in the data file. "
+                             "Line it up by hand instead.")
+            return
+        parts = [(p.path, p.start) for p in self.info.parts]
+        telem, key = self.telem, (tuple(self.parts), self.csv_path)
+        self._autosync_busy = True
+        self.btn_autosync.setEnabled(False)
+        self.btn_autosync.setText("Reading camera sensors…")
+        self._set_status("Auto-sync: reading the GoPro's accelerometer and "
+                         "matching it to the data file…")
+
+        def work():
+            try:
+                res, *_ , info = gosync.sync_parts(parts, telem)
+                self._autosync_res = ("ok", key, res, info)
+            except gosync.NoCameraData:
+                self._autosync_res = ("nodata", key, None, None)
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                self._autosync_res = ("error", key, str(e), None)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_auto_sync(self):
+        kind, key, res, info = self._autosync_res
+        self._autosync_res = None
+        self._autosync_busy = False
+        self.btn_autosync.setEnabled(True)
+        self.btn_autosync.setText("Auto-sync from GoPro sensors")
+        if key != (tuple(self.parts), self.csv_path):
+            self._set_status("Auto-sync skipped: the files changed while it ran.")
+            return
+        if kind == "nodata":
+            QtWidgets.QMessageBox.information(
+                self, "No GoPro sensor data",
+                "This video has no GoPro sensor track, so it can't be synced "
+                "automatically.\n\nOpen the original files from the camera "
+                "(GH01xxxx.MP4 and its other chapters). Videos merged in "
+                "LosslessCut or re-encoded lose the sensor track. Race "
+                "Overlay can play the chapters as one video without merging "
+                "them.\n\nOr line it up by hand below.")
+            self._set_status("Auto-sync: no GoPro sensor data in this video.")
+            return
+        if kind == "error":
+            self._set_status(f"Auto-sync failed: {res}")
+            return
+        detail = (f"match {res.score:.0%} (next best {res.runner_up:.0%})")
+        if not res.confident:
+            r = QtWidgets.QMessageBox.question(
+                self, "Weak match",
+                f"The best match is weak: {detail}.\n\n"
+                "This happens with short clips, very little driving in the "
+                "video, or a data file from a different session.\n\n"
+                f"Try it anyway (offset {res.offset:+.2f} s)? You can check it "
+                "with Check lap and fine-tune.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if r != QtWidgets.QMessageBox.Yes:
+                self._set_status(f"Auto-sync: no confident match ({detail}). "
+                                 "Line it up by hand below.")
+                return
+        self._set_offset(res.offset, from_spin=False)
+        steady = (f", steady within ±{res.spread:.2f} s"
+                  if len(res.window_offsets) >= 3 else "")
+        self._mark_synced(f"Auto-synced: offset {res.offset:+.2f} s, {detail}"
+                          f"{steady}. Check a braking zone to be sure.")
 
     def _nudge(self, amount: float | None, sign: int):
         """sign +1 = gauges earlier (offset up), -1 = later."""
@@ -2379,6 +2765,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_decode_label()
         if self._hw is not None and not self._hw_applied:
             self._apply_hw()
+        if self._autosync_res is not None:
+            self._finish_auto_sync()
         if self.info is None:
             self.time_lbl.setText("")
             return

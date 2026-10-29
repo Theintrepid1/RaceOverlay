@@ -49,8 +49,17 @@ Video with a live overlay preview on the left; four tabs on the right.
   and it offers to load the whole recording as one video, without writing
   anything to disk. **Merge files…** joins any videos in an order you choose;
   **Save merged file** writes them as one MP4 losslessly.
-- **1 · Line it up:** pause where the car crosses start/finish, pick which
-  lap is starting, click **Sync here**. Or Ctrl+click a speed drop in the trace.
+- **Import from GoPro card…:** lists the recordings on the card (newest first,
+  already-copied ones unticked), copies the ticked ones into a folder per day
+  (`<library>/2026-09-27/`) with chapters kept as-is, then matches each to a
+  data file in your data folder by syncing against every candidate from that
+  day, and opens the one you pick already synced. Nothing on the card changes.
+- **1 · Line it up:** **Auto-sync from GoPro sensors** matches the camera's
+  accelerometer to the data file's g-forces (no camera GPS needed; needs the
+  original GoPro files, since merged or re-encoded videos lose the sensor
+  track). Weak matches ask first. Or by hand: pause where the car crosses
+  start/finish, pick which lap is starting, click **Sync here**, or Ctrl+click
+  a speed drop in the trace.
 - **2 · Fine-tune:** gauges react before the car → **Later**; lag → **Earlier**.
 
 **Export tab**

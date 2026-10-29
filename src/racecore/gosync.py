@@ -228,17 +228,45 @@ def to_car_frame(cam_time: np.ndarray, cam_h: np.ndarray, tel: Telemetry,
     return car, info
 
 
-def sync_video(path: str, tel: Telemetry) -> tuple[SyncResult, np.ndarray, np.ndarray, dict]:
-    """Read a GoPro MP4's accelerometer and sync it to `tel`.
+class NoCameraData(ValueError):
+    """The video has no GoPro accelerometer track (not a GoPro file, or one
+    that was merged/re-encoded by a tool that dropped the gpmd track)."""
 
-    Returns (sync result, camera sample times, car-frame g, rotation info).
-    Raises ValueError if the file has no accelerometer track.
+
+def read_accel(parts: list[tuple[str, float]]) -> tuple[np.ndarray, np.ndarray]:
+    """Accelerometer for a video made of one or more files.
+
+    `parts` = [(path, start of that file on the joined timeline), ...], e.g.
+    GoPro chapters. Returns (times on the joined timeline, (N,3) m/s^2).
+    Raises NoCameraData if no file has an accelerometer track.
     """
     from . import gpmf
-    acc = gpmf.read_sensors(path, keys=("ACCL",)).get("ACCL")
-    if acc is None or len(acc.values) < 1000:
-        raise ValueError(f"{path}: no GoPro accelerometer data")
-    return sync_streams(acc.time, acc.values, tel)
+    ts, vs, missing = [], [], []
+    for path, start in parts:
+        acc = gpmf.read_sensors(path, keys=("ACCL",)).get("ACCL")
+        if acc is None or len(acc.values) == 0:
+            missing.append(path)
+            continue
+        ts.append(acc.time + start)
+        vs.append(acc.values)
+    if not ts or sum(len(v) for v in vs) < 1000:
+        raise NoCameraData(
+            "no GoPro sensor data in " + ", ".join(p for p, _ in parts))
+    return np.concatenate(ts), np.vstack(vs)
+
+
+def sync_parts(parts: list[tuple[str, float]], tel: Telemetry):
+    """Read a GoPro video's accelerometer (all chapters) and sync it to `tel`.
+
+    Returns (sync result, camera sample times, car-frame g, rotation info).
+    """
+    t, a = read_accel(parts)
+    return sync_streams(t, a, tel)
+
+
+def sync_video(path: str, tel: Telemetry):
+    """sync_parts() for a single file."""
+    return sync_parts([(path, 0.0)], tel)
 
 
 def sync_streams(cam_time: np.ndarray, accel: np.ndarray, tel: Telemetry):
