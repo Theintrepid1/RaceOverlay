@@ -27,7 +27,7 @@ class CornersPage(QtWidgets.QWidget):
         self.turns: list[int] = []     # turns picked (a series loops on the video)
         lay = QtWidgets.QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.split = split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
         left = QtWidgets.QWidget()
         ll = QtWidgets.QVBoxLayout(left)
@@ -96,8 +96,34 @@ class CornersPage(QtWidgets.QWidget):
         split.addWidget(right)
         split.setSizes([560, 460])
         lay.addWidget(split)
+        self.left = left
         self.marker = None
         self.ref_marker = None
+
+    # ------------------------------------------------------------ layout
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._arrange()
+
+    def _arrange(self):
+        """Side by side when there's width to spare; table over the g-g when the
+        page is narrow (video showing), so the circle isn't a thin strip."""
+        W, H = self.width(), self.height()
+        want = QtCore.Qt.Vertical if W < 1.3 * H else QtCore.Qt.Horizontal
+        if self.split.orientation() != want:
+            self.split.setOrientation(want)
+        if want == QtCore.Qt.Vertical:
+            t = self.table
+            rows = sum(t.rowHeight(r) for r in range(t.rowCount()))
+            need = (self.left.sizeHint().height() - t.sizeHint().height()
+                    + t.horizontalHeader().height() + rows + 8)
+            top = int(min(max(need, 160), H * 0.5))
+            self.split.setSizes([top, H - top])
+        elif self._last_orient != want:
+            self.split.setSizes([int(W * 0.55), W - int(W * 0.55)])
+        self._last_orient = want
+
+    _last_orient = None
 
     # ------------------------------------------------------------ updates
     def refresh(self):
@@ -133,6 +159,21 @@ class CornersPage(QtWidgets.QWidget):
         kx, ky = self._k()
         self.ref_marker.setData([kx * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
                                 [ky * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
+
+    def _extent(self) -> float:
+        """Half-width of the g-g view: a little past the grip envelope and the
+        laps shown, so the circle fills the plot (0.8 g .. 2 g)."""
+        a, w = self.win.a, self.win
+        r = 0.0
+        if a.envelope is not None:
+            r = float(np.max(a.envelope.radius))
+        for lap in (a.ref, w.focus_lap()):
+            if lap is not None and lap.lat_g is not None and lap.lon_g is not None:
+                g = np.hypot(lap.lat_g, lap.lon_g)
+                g = g[np.isfinite(g)]
+                if g.size:
+                    r = max(r, float(np.percentile(g, 99.5)))
+        return float(np.clip(np.ceil((r * 1.15) * 10) / 10, 0.8, 2.0))
 
     def _k(self) -> float:
         """(x, y) signs: +1 plots the car's acceleration, -1 flips that axis
@@ -234,6 +275,8 @@ class CornersPage(QtWidgets.QWidget):
                 t.setItem(r, col, it)
         self._select_rows()
         t.resizeColumnsToContents()
+        if self.split.orientation() == QtCore.Qt.Vertical:
+            QtCore.QTimer.singleShot(0, self._arrange)
 
     def _sorted(self, res):
         how = self.sort.currentData()
@@ -320,20 +363,22 @@ class CornersPage(QtWidgets.QWidget):
             return
         grid_pen = pg.mkPen("#3a3a37", width=1)
         th = np.linspace(0, 2 * np.pi, 121)
-        for r in (0.5, 1.0, 1.5):
+        R = self._extent()
+        for r in [x for x in (0.5, 1.0, 1.5, 2.0) if x <= R + 1e-6]:
             self.gg.plot(r * np.cos(th), r * np.sin(th), pen=grid_pen)
             lbl = pg.TextItem(f"{r:g} g", color="#6b6a64", anchor=(0, 1))
             lbl.setPos(r * 0.71, r * 0.71)
             self.gg.addItem(lbl)
-        self.gg.plot([-1.6, 1.6], [0, 0], pen=grid_pen)
-        self.gg.plot([0, 0], [-1.6, 1.6], pen=grid_pen)
+        self.gg.plot([-R, R], [0, 0], pen=grid_pen)
+        self.gg.plot([0, 0], [-R, R], pen=grid_pen)
+        e = R * 0.97
         kx, ky = self._k()
         self.gg.setLabel("bottom", "Lateral g")
         self.gg.setLabel("left", "Longitudinal g")
-        for txt, x, y, anc in (("Braking", 0, -1.55 * ky, (0.5, 0 if ky > 0 else 1)),
-                               ("Accel", 0, 1.55 * ky, (0.5, 1 if ky > 0 else 0)),
-                               ("Left turn", -1.55 * kx, 0, (0 if kx > 0 else 1, 1)),
-                               ("Right turn", 1.55 * kx, 0, (1 if kx > 0 else 0, 1))):
+        for txt, x, y, anc in (("Braking", 0, -e * ky, (0.5, 0 if ky > 0 else 1)),
+                               ("Accel", 0, e * ky, (0.5, 1 if ky > 0 else 0)),
+                               ("Left turn", -e * kx, 0, (0 if kx > 0 else 1, 1)),
+                               ("Right turn", e * kx, 0, (1 if kx > 0 else 0, 1))):
             t = pg.TextItem(txt, color="#8a8983", anchor=anc)
             t.setPos(x, y)
             self.gg.addItem(t)
@@ -371,7 +416,7 @@ class CornersPage(QtWidgets.QWidget):
             names = cs[0].name if len(cs) == 1 else f"{cs[0].name}–{cs[-1].name}"
             t = pg.TextItem(f"{names}: this lap vs reference (grey)", color="#d8d7d0",
                             anchor=(0, 0))
-            t.setPos(-1.6, 1.6)
+            t.setPos(-R, R)
             self.gg.addItem(t)
         # reference video's dot (grey, under) and yours (your lap's colour)
         self.ref_marker = self.gg.plot([], [], pen=None, symbol="o", symbolSize=13,
@@ -380,7 +425,7 @@ class CornersPage(QtWidgets.QWidget):
         self.marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=14,
                                    symbolPen=pg.mkPen(CURSOR, width=2),
                                    symbolBrush=pg.mkBrush(w.color(ld.key)))
-        self.gg.setRange(xRange=(-1.6, 1.6), yRange=(-1.6, 1.6), padding=0.02)
+        self.gg.setRange(xRange=(-R, R), yRange=(-R, R), padding=0.02)
         self.cursor(w.cursor_d)
         self.ref_cursor(w.ref_d)
 
