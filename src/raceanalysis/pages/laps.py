@@ -48,6 +48,16 @@ class LapsPage(QtWidgets.QWidget):
             ln.sigDragged.connect(lambda l: self.win.set_cursor(self.win.from_x(l.value())))
             p.addItem(ln, ignoreBounds=True)
             self.cursors.append(ln)
+        # the reference video's position (ghost mode: not where yours is)
+        self.ref_lines = []
+        for p in self.plots:
+            ln = pg.InfiniteLine(angle=90, movable=False,
+                                 pen=pg.mkPen(REF_COLOR, width=1, style=QtCore.Qt.DashLine))
+            ln.hide()
+            p.addItem(ln, ignoreBounds=True)
+            self.ref_lines.append(ln)
+        self.dots = []        # (plot, channel key, your dot, reference dot)
+        self._ys = {}
         self.traces.scene().sigMouseClicked.connect(self._traces_clicked)
         split.addWidget(self.traces)
 
@@ -70,6 +80,7 @@ class LapsPage(QtWidgets.QWidget):
         split.setSizes([760, 260])
         lay.addWidget(split)
         self.marker = None
+        self.ref_marker = None
 
     # ------------------------------------------------------------ updates
     def refresh(self):
@@ -81,6 +92,7 @@ class LapsPage(QtWidgets.QWidget):
         self._draw_traces()
         self._draw_map()
         self.cursor(self.win.cursor_d)
+        self.ref_cursor(self.win.ref_d)
 
     def zoom(self, d0: float | None, d1: float | None):
         w = self.win
@@ -102,12 +114,53 @@ class LapsPage(QtWidgets.QWidget):
         if self.marker is not None and ld is not None:
             k = min(int(np.searchsorted(ld.d, d)), len(ld.xy) - 1)
             self.marker.setData([ld.xy[k, 0]], [ld.xy[k, 1]])
+        self._place_dots(0, d)
+        self._ref_line_check()
+
+    def ref_cursor(self, rd: float | None):
+        """Where the reference video is (None: no reference video showing)."""
+        self._rd = rd
+        a = self.win.a
+        ref = a.ref
+        if self.ref_marker is not None:
+            if rd is None or ref is None:
+                self.ref_marker.setData([], [])
+            else:
+                k = min(int(np.searchsorted(ref.d, rd)), len(ref.xy) - 1)
+                self.ref_marker.setData([ref.xy[k, 0]], [ref.xy[k, 1]])
+        self._place_dots(1, rd)
+        self._ref_line_check()
+
+    _rd = None
+
+    def _ref_line_check(self):
+        rd, d = self._rd, self.win.cursor_d
+        show = rd is not None and abs(rd - d) > 1.0
+        for ln in self.ref_lines:
+            ln.setVisible(show)
+            if show:
+                ln.setValue(float(self.win.x(rd)))
+
+    def _place_dots(self, which: int, d):
+        """which 0: your lap's dots at d; 1: the reference's."""
+        w, a = self.win, self.win.a
+        x = None if d is None else float(w.x(d))
+        for _p, key, *items in self.dots:
+            item = items[which]
+            ys = self._ys.get((which, key))
+            if x is None or ys is None:
+                item.setData([], [])
+                continue
+            y = float(np.interp(d, a.grid, ys))
+            item.setData([x], [y] if np.isfinite(y) else [])
 
     # ------------------------------------------------------------ drawing
     def _draw_traces(self):
-        for p, cur in zip(self.plots, self.cursors):
+        self.dots = []
+        for p, cur, rl in zip(self.plots, self.cursors, self.ref_lines):
             p.clear()
             p.addItem(cur, ignoreBounds=True)
+            p.addItem(rl, ignoreBounds=True)
         w, a = self.win, self.win.a
         if a.ref is None:
             return
@@ -156,10 +209,39 @@ class LapsPage(QtWidgets.QWidget):
             t.setPos(float(w.x(c.apex_d)), vr[1])
             self.p_speed.addItem(t, ignoreBounds=True)
         self.p_delta.setXRange(0, float(x[-1]), padding=0.01)
+        self._make_dots()
+
+    def _make_dots(self):
+        """Dots riding your trace and the reference's, so it's clear which
+        line belongs to which video."""
+        w, a = self.win, self.win.a
+        self.dots, self._ys = [], {}
+        ld = w.focus_lap()
+        laps = [(0, ld), (1, a.ref)]
+        for p, key in ((self.p_speed, "speed"), (self.p_long, "lon_g"), (self.p_grip, "grip")):
+            for which, lap in laps:
+                if lap is None:
+                    continue
+                if key == "speed":
+                    ys = w.spd(a.channel_on_grid(lap, "speed"))
+                elif key == "grip":
+                    u = a.grip_on_grid(lap)
+                    ys = None if u is None else u * 100
+                else:
+                    ys = a.channel_on_grid(lap, key)
+                if ys is not None:
+                    self._ys[(which, key)] = np.asarray(ys, dtype=float)
+            you = p.plot([], [], pen=None, symbol="o", symbolSize=10,
+                         symbolPen=pg.mkPen(CURSOR, width=1.5),
+                         symbolBrush=pg.mkBrush(w.color(ld.key) if ld is not None else CURSOR))
+            ref = p.plot([], [], pen=None, symbol="o", symbolSize=9,
+                         symbolPen=pg.mkPen(CURSOR, width=1.5), symbolBrush=pg.mkBrush(REF_COLOR))
+            self.dots.append((p, key, you, ref))
 
     def _draw_map(self):
         self.map.clear()
         self.marker = None
+        self.ref_marker = None
         w, a = self.win, self.win.a
         if a.ref is None:
             return
@@ -187,6 +269,9 @@ class LapsPage(QtWidgets.QWidget):
         sx, sy = ref.xy[0]
         self.map.plot([sx], [sy], pen=None, symbol="s", symbolSize=9,
                       symbolBrush=pg.mkBrush("#f2f1ec"))
+        self.ref_marker = self.map.plot([], [], pen=None, symbol="o", symbolSize=12,
+                                        symbolPen=pg.mkPen(CURSOR, width=2),
+                                        symbolBrush=pg.mkBrush(REF_COLOR))
         self.marker = self.map.plot([sx], [sy], pen=None, symbol="o", symbolSize=13,
                                     symbolPen=pg.mkPen("#0b0b0b", width=2),
                                     symbolBrush=pg.mkBrush(w.color(w.focus)))

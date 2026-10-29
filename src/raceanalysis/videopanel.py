@@ -99,6 +99,16 @@ class ReadoutStrip(QtWidgets.QFrame):
         self.px = 0
         self.set_scale(30)
 
+    def set_accent(self, color: str):
+        """Colour bar down the left edge (and the lap number) matching this
+        video's trace, so it's clear which line on the plots is which."""
+        if getattr(self, "_accent", None) == color:
+            return
+        self._accent = color
+        self.setStyleSheet(f"ReadoutStrip {{ background:{PANEL}; "
+                           f"border-left: 6px solid {color}; }}")
+        self.lap.value.setStyleSheet(f"color:{color};")
+
     def set_scale(self, px: int):
         if px == self.px:
             return
@@ -179,6 +189,9 @@ class VideoPanel(QtWidgets.QWidget):
         self.btn_back = _btn("−2 s", lambda: self.step(-2.0))
         self.btn_play = _btn("Play", self.toggle_play)
         self.btn_fwd = _btn("+2 s", lambda: self.step(2.0))
+        self.btn_back.setToolTip("Back 2 s (←; Shift+← 0.2 s; , one frame)")
+        self.btn_play.setToolTip("Play / pause (Space)")
+        self.btn_fwd.setToolTip("Forward 2 s (→; Shift+→ 0.2 s; . one frame)")
         self.status = QtWidgets.QLabel("")
         self.status.setStyleSheet(f"color:{INK_DIM};")
         for w in (self.btn_back, self.btn_play, self.btn_fwd):
@@ -186,7 +199,7 @@ class VideoPanel(QtWidgets.QWidget):
         cl.addWidget(self.status, 1)
         self.chk_ref = QtWidgets.QCheckBox("Ref video")
         self.chk_ref.setStyleSheet(f"color:{INK};")
-        self.chk_ref.setToolTip("Show the reference lap's video under this one, kept in step")
+        self.chk_ref.setToolTip("Show the reference lap's video under this one, kept in step (R)")
         self.chk_ref.toggled.connect(self._compare_toggled)
         cl.addWidget(self.chk_ref)
         self.mode = QtWidgets.QComboBox()
@@ -372,6 +385,12 @@ class VideoPanel(QtWidgets.QWidget):
     def pause(self):
         try:
             self.player.pause = True
+        except Exception:
+            pass
+
+    def frame(self, forward: bool):
+        try:
+            self.player.command("frame-step" if forward else "frame-back-step")
         except Exception:
             pass
 

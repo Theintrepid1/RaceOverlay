@@ -74,6 +74,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._ref_duration = 0.0
         self._ref_anchor: tuple[float, float] | None = None   # (your video t, ref video t)
         self._ref_i = 0.0
+        self.ref_d: float | None = None   # where the reference video is, metres
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1680, int(avail.width() * 0.96)),
                     min(1040, int(avail.height() * 0.94)))
@@ -102,6 +103,25 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.act_video = m.addAction("Show video on this tab", self._toggle_video, "V")
         self.act_video.setCheckable(True)
         m.addAction("Pop out this tab", self._pop_current, "Ctrl+Shift+P")
+        m = mb.addMenu("Vi&deo")
+        vp = lambda: self.videop  # noqa: E731 - built below
+        self.video_actions = []
+        for text, key, fn in (
+                ("Play / pause", "Space", lambda: vp().toggle_play()),
+                ("Back 2 s", "Left", lambda: vp().step(-2.0)),
+                ("Forward 2 s", "Right", lambda: vp().step(2.0)),
+                ("Back 0.2 s", "Shift+Left", lambda: vp().step(-0.2)),
+                ("Forward 0.2 s", "Shift+Right", lambda: vp().step(0.2)),
+                ("Back one frame", ",", lambda: vp().frame(False)),
+                ("Forward one frame", ".", lambda: vp().frame(True)),
+                ("Back to start of turn / lap", "Home", self._restart),
+                ("Reference video", "R", lambda: vp().chk_ref.toggle()),
+                ("Loop picked turns", "L", lambda: self._page(CornersPage).loop.toggle())):
+            act = m.addAction(text, fn)
+            act.setShortcut(QtGui.QKeySequence(key))
+            # this window only (not dialogs); pop-outs get the same actions
+            act.setShortcutContext(QtCore.Qt.WindowShortcut)
+            self.video_actions.append(act)
 
         central = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(central)
@@ -275,6 +295,20 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 self._loop_vt = (t0, t1)
         self.videop.set_ab(self._loop_vt)
 
+    def _restart(self):
+        """Home: back to the start of the looped turns, else the lap."""
+        d = self._loop[0] if self._loop is not None else 0.0
+        self.set_cursor(d, seek=True)
+
+    def _set_ref_d(self, rd):
+        if rd is None and self.ref_d is None:
+            return
+        if rd is not None and self.ref_d is not None and abs(rd - self.ref_d) < 0.2:
+            return
+        self.ref_d = rd
+        for p in self.pages:
+            p.ref_cursor(rd)
+
     def zoom(self, d0, d1):
         self._page(LapsPage).zoom(d0, d1)
 
@@ -387,6 +421,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         geo = settings().value(f"analysis/popout/{page.title}")
         if geo is None or not w.restoreGeometry(geo):
             w.resize(1000, 700)
+        w.addActions(self.video_actions)
         w.closed.connect(self._pop_closed)
         self._popouts[page.title] = w
         settings().setValue(f"analysis/popped/{page.title}", True)
@@ -440,6 +475,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             note = "No synced video for this session (File → Find video for this session…)."
         elif seek and not self._seek_lap(ld, t_into):
             note = "This point isn't in the video."
+        self.videop.strip.set_accent(self.color(ld.key))
         self.videop.strip.show_values(f"{ld.lap.n}", fmt_lap(t_into, 1), f"{spd:.0f}",
                                       self.speed_unit(), dl, gear, rpm, note)
 
@@ -561,14 +597,17 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         vp, a = self.videop, self.a
         ref = a.ref
         if not vp.compare or ref is None or vp.ref_video is None:
+            self._set_ref_d(None)
             return
         if self._ref_session is None or self._ref_session != ref.session:
+            self._set_ref_d(None)
             return
         rs = a.sessions[ref.session]
         roff = rs.video[1]
         if ld is ref:
             vp.ref_pause()
             vp.set_ref_note("This is the reference lap. Pick another lap to compare.")
+            self._set_ref_d(None)
             return
         d = self.cursor_d
         spot = ref.lap.start + a.time_at(ref, d) - roff
@@ -583,6 +622,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if not (0 <= target <= (self._ref_duration or 1e9)) or not (-5 <= r_into <= ref.time + 5):
             vp.ref_pause()
             vp.set_ref_note("The reference lap isn't in its video here.")
+            self._set_ref_d(None)
             return
         vp.set_ref_note("")
         r_paused, rt = vp.ref_state()
@@ -620,8 +660,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             gap = ("AHEAD" if g >= 0 else "BEHIND", f"{abs(g):.0f}", self.dist_unit())
         else:
             gap = ("VS YOU", f"{-float(np.interp(d, a.grid, a.delta(ld))):+.2f}", "s")
+        vp.ref_strip.set_accent(REF_COLOR)
         vp.ref_strip.show_values(f"{ref.lap.n}", fmt_lap(r_into, 1), f"{rspd:.0f}",
                                  self.speed_unit(), None, gap=gap)
+        self._set_ref_d(rd)
 
     # ========================================================== sessions ===
     def add_session(self, path: str, tel=None, video=None, quiet=False,

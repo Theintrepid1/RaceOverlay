@@ -224,6 +224,9 @@ class OverviewPage(QtWidgets.QWidget):
     def cursor(self, d: float):
         pass
 
+    def ref_cursor(self, rd):
+        pass
+
     # ------------------------------------------------------------- parts
     def _cards(self):
         w, a = self.win, self.win.a

@@ -19,7 +19,7 @@ class CornersPage(QtWidgets.QWidget):
     video_default = True
     SORTS = [("Track order", "track"), ("Most time lost", "lost"),
              ("Most time gained", "gained"), ("Least grip used", "grip"),
-             ("Furthest from best anyone", "best")]
+             ("Most to gain vs best lap here", "best")]
 
     def __init__(self, win):
         super().__init__()
@@ -77,6 +77,7 @@ class CornersPage(QtWidgets.QWidget):
         split.setSizes([560, 460])
         lay.addWidget(split)
         self.marker = None
+        self.ref_marker = None
 
     # ------------------------------------------------------------ updates
     def refresh(self):
@@ -88,6 +89,7 @@ class CornersPage(QtWidgets.QWidget):
         self._fill()
         self._draw_gg()
         self.cursor(self.win.cursor_d)
+        self.ref_cursor(self.win.ref_d)
         self._apply_loop()
 
     def cursor(self, d: float):
@@ -97,6 +99,18 @@ class CornersPage(QtWidgets.QWidget):
             return
         self.marker.setData([float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
                             [float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
+
+    def ref_cursor(self, rd: float | None):
+        """Where the reference video is (None: no reference video showing)."""
+        a = self.win.a
+        ref = a.ref
+        if self.ref_marker is None:
+            return
+        if rd is None or ref is None or ref.lat_g is None or ref.lon_g is None:
+            self.ref_marker.setData([], [])
+            return
+        self.ref_marker.setData([float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
+                                [float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
 
     def show_turn(self, n: int):
         """Pick turn n (from the Overview's biggest losses)."""
@@ -119,49 +133,69 @@ class CornersPage(QtWidgets.QWidget):
         ld = w.focus_lap()
         t.setHorizontalHeaderLabels(["Turn", "Time vs ref", "Grip used",
                                      f"Min speed ({w.speed_unit()})",
-                                     f"Braked ({w.dist_unit()} vs ref)", "Best anyone"])
+                                     f"Braked ({w.dist_unit()} vs ref)", "Best lap here"])
+        hdr = t.horizontalHeaderItem(5)
+        if hdr is not None:
+            hdr.setToolTip("The quickest any loaded lap went through this turn, and how much "
+                           "quicker than this lap it was.\nAdd them up and that's the time "
+                           "on the table if every turn matched the best you've done there.")
         if ld is None or a.ref is None:
             self.caption.setText("")
             return
-        if ld is a.ref:
-            self.caption.setText("Pick a lap other than the reference (top bar) to see where "
-                                 "it gained or lost time.")
-            return
+        is_ref = ld is a.ref
         res = self._sorted(a.corner_results(ld))
         named = a.profile is not None and a.profile.turns
+        head = (f"<b>{w.name(ld)}</b> is the reference; pick another lap in the top bar to "
+                "compare. " if is_ref else
+                f"<b>{w.name(ld)}</b> vs reference: {fmt_gap(ld.time - a.ref.time)} s. ")
         self.caption.setText(
-            f"<b>{w.name(ld)}</b> vs reference: {fmt_gap(ld.time - a.ref.time)} s. "
-            + (f"Turns from the {a.profile.name} map. " if named else
-               "Corners found from speed (Track → Track turns… names them like the map). ")
-            + "Click a turn to see it on the g-g and jump the video to its braking zone.")
+            head + (f"Turns from the {a.profile.name} map. " if named else
+                    "Corners found from speed (Track → Track turns… names them like the map). ")
+            + "Click a turn to loop it on the video; shift-click for a run of turns.")
         t.setRowCount(len(res))
         for r, cr in enumerate(res):
             c = cr.corner
-            if cr.brake_d is not None and cr.brake_d_ref is not None:
+            if is_ref or cr.brake_d is None or cr.brake_d_ref is None:
+                brake = ""
+            else:
                 diff = w.x(cr.brake_d - cr.brake_d_ref)
                 brake = (f"{abs(diff):.0f} later" if diff > 0 else
                          f"{abs(diff):.0f} earlier" if diff < 0 else "same")
-            else:
-                brake = "no hard braking"
             g = cr.grip
             have_g = g is not None and g.used is not None and g.used_ref is not None
-            cells = [c.name + (f" ({c.direction})" if c.direction else ""), fmt_gap(cr.lost),
-                     f"{g.used * 100:.0f}% / {g.used_ref * 100:.0f}%" if have_g else "",
-                     f"{w.spd(cr.vmin):.0f} / {w.spd(cr.vmin_ref):.0f}", brake,
-                     fmt_gap(cr.best_lost)]
+            if not have_g:
+                grip = ""
+            elif is_ref:
+                grip = f"{g.used * 100:.0f}%"
+            else:
+                grip = f"{g.used * 100:.0f}% / {g.used_ref * 100:.0f}%"
+            vmin = (f"{w.spd(cr.vmin):.0f}" if is_ref else
+                    f"{w.spd(cr.vmin):.0f} / {w.spd(cr.vmin_ref):.0f}")
+            to_best = cr.lost - cr.best_lost          # >= 0: how much quicker the best lap was
+            best_ld = w.lap(cr.best_key) if cr.best_key is not None else None
+            if best_ld is None or to_best < 0.005 or cr.best_key == ld.key:
+                best = "this lap"
+            else:
+                best = f"L{best_ld.lap.n}  {to_best:.2f} quicker"
+                if len(a.sessions) > 1:
+                    best = f"{w.label(best_ld)}  {to_best:.2f} quicker"
+            cells = [c.name + (f" ({c.direction})" if c.direction else ""),
+                     "" if is_ref else fmt_gap(cr.lost), grip, vmin, brake, best]
             for col, txt in enumerate(cells):
                 it = QtWidgets.QTableWidgetItem(txt)
                 it.setData(QtCore.Qt.UserRole, c.n)
                 if col == 1:
                     it.setForeground(QtGui.QColor(LOSS if cr.lost > 0.05 else
                                                   GAIN if cr.lost < -0.05 else NEUTRAL))
-                if col == 2 and have_g:
+                if col == 2 and have_g and not is_ref:
                     it.setForeground(QtGui.QColor(LOSS if g.used < g.used_ref - 0.05 else
                                                   GAIN if g.used > g.used_ref + 0.05 else NEUTRAL))
                     it.setToolTip(f"Grip used while cornering/braking: this lap {g.used:.0%}, "
                                   f"reference {g.used_ref:.0%}. Peak {g.peak_g:.2f} g vs "
                                   f"{g.peak_g_ref:.2f} g; below 80% for {g.soft_s:.1f} s vs "
                                   f"{g.soft_s_ref:.1f} s.")
+                if col == 5 and best != "this lap":
+                    it.setForeground(QtGui.QColor(LOSS if to_best > 0.1 else NEUTRAL))
                 if col > 0:
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(r, col, it)
@@ -247,6 +281,7 @@ class CornersPage(QtWidgets.QWidget):
     def _draw_gg(self):
         self.gg.clear()
         self.marker = None
+        self.ref_marker = None
         w, a = self.win, self.win.a
         if a.ref is None:
             return
@@ -292,8 +327,14 @@ class CornersPage(QtWidgets.QWidget):
                             anchor=(0, 0))
             t.setPos(-1.6, 1.6)
             self.gg.addItem(t)
-        self.marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=13,
-                                   symbolPen=pg.mkPen("#0b0b0b", width=2),
-                                   symbolBrush=pg.mkBrush(CURSOR))
+        # reference video's dot (grey, under) and yours (your lap's colour)
+        self.ref_marker = self.gg.plot([], [], pen=None, symbol="o", symbolSize=13,
+                                       symbolPen=pg.mkPen(CURSOR, width=2),
+                                       symbolBrush=pg.mkBrush(REF_COLOR))
+        self.marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=14,
+                                   symbolPen=pg.mkPen(CURSOR, width=2),
+                                   symbolBrush=pg.mkBrush(w.color(ld.key)))
         self.gg.setRange(xRange=(-1.6, 1.6), yRange=(-1.6, 1.6), padding=0.02)
+        self.cursor(w.cursor_d)
+        self.ref_cursor(w.ref_d)
 
