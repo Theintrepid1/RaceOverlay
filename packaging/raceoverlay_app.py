@@ -6,6 +6,7 @@ One executable does three jobs:
     raceoverlay [VIDEO]          the app
     raceoverlay --engine JOB     the render engine (started by the app)
     raceoverlay --cli ARGS...    the command-line tool
+    raceoverlay --analysis [CSV] Race Analysis (lap comparison)
 
 Library and player setup happens earlier, in raceoverlay_boot.py (a
 PyInstaller runtime hook that runs before Qt is imported).
@@ -23,6 +24,9 @@ def main():
     if args[:1] == ["--cli"]:
         from raceoverlay import cli
         return cli.main(args[1:])
+    if args[:1] == ["--analysis"]:
+        from raceanalysis import app
+        return app.main(args[1:])
     from raceoverlay import syncgui
     return syncgui.main(args)
 

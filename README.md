@@ -120,6 +120,30 @@ parallel (one per CPU core), only the gauge areas are sent to ffmpeg instead
 of full transparent frames, encoding uses your GPU when available (Intel Quick
 Sync, AMD, NVIDIA), and audio is added once at the end.
 
+## Race Analysis (lap comparison)
+
+Open it with **Analyze laps…** in the Sync tab (takes the current data file
+and synced video along), from the app menu ("Race Analysis"), or with
+`raceoverlay --analysis [data.csv ...]` / `./launch.sh --analysis`.
+
+- **Lap table:** every session's laps with lap time, gap to the reference
+  (the fastest lap unless you pick another), and sector times (equal thirds of
+  the lap). Best sectors are purple; the theoretical best adds them up.
+  **Add session…** loads more data files from the same track.
+- **Traces against distance:** delta to the reference, speed, and braking /
+  acceleration g for the reference plus up to four laps. Laps are lined up by
+  GPS position on the reference lap, so the same point on track lines up even
+  with a different line.
+- **Corners:** found on the reference lap and numbered C1, C2… in track order
+  (not the track's official turn numbers; flat-out kinks don't count). For the
+  selected lap: time lost or gained in each corner's stretch, minimum speed,
+  where braking started vs the reference, and the best any lap did there.
+  Sorted worst first; click one to jump the video to its braking zone.
+- **Track map:** the reference line coloured where the selected lap gained
+  (green) or lost (red) time; click it to move the cursor.
+- **Video:** a session's synced video (found from Race Overlay's saved sync)
+  follows the cursor, and the cursor follows the video while it plays.
+
 ## CLI usage
 
 ```bash

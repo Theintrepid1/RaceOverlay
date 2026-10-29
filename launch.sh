@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Starts the Race Overlay sync GUI. Used by the desktop launcher; also fine to
-# run directly. Any arguments (e.g. a video path) are passed through.
+# Starts the Race Overlay sync GUI (or Race Analysis with --analysis). Used by
+# the desktop launchers; also fine to run directly. Any other arguments (e.g. a
+# video path) are passed through.
 DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 LOG="${XDG_STATE_HOME:-$HOME/.local/state}/raceoverlay/launch.log"
 mkdir -p "$(dirname "$LOG")"
@@ -25,8 +26,10 @@ python -m venv .venv
     exit 1
 fi
 
+MODULE=raceoverlay.syncgui
+if [ "${1:-}" = "--analysis" ]; then MODULE=raceanalysis; shift; fi
 cd "$DIR"
-PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m raceoverlay.syncgui "$@" 2>"$LOG"
+PYTHONPATH="$DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m "$MODULE" "$@" 2>"$LOG"
 rc=$?
 # Exit 1 = the app already showed its own error dialog (or the user cancelled
 # a file picker). Anything else unexpected: show the end of the log.

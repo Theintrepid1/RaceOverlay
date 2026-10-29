@@ -188,9 +188,9 @@ def appimage_path() -> str | None:
     return p if p and os.path.exists(p) else None
 
 
-def _desktop_file() -> Path:
+def _desktop_file(name: str = "raceoverlay") -> Path:
     base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-    return base / "applications" / "raceoverlay.desktop"
+    return base / "applications" / f"{name}.desktop"
 
 
 def menu_entry_target() -> str | None:
@@ -221,6 +221,13 @@ def add_menu_entry(appimage: str):
         "Categories=AudioVideo;Video;\n"
         "MimeType=video/mp4;video/quicktime;video/x-matroska;\n"
         "StartupWMClass=raceoverlay\n", encoding="utf-8")
+    _desktop_file("raceanalysis").write_text(
+        "[Desktop Entry]\nType=Application\nName=Race Analysis\n"
+        "GenericName=Lap Analysis\n"
+        "Comment=Compare laps and sessions and find where the time goes\n"
+        f'Exec="{appimage}" --analysis %F\nIcon=raceoverlay\nTerminal=false\n'
+        "Categories=AudioVideo;Video;\nMimeType=text/csv;\n"
+        "StartupWMClass=raceanalysis\n", encoding="utf-8")
     for cmd in (["update-desktop-database", str(f.parent)],
                 ["gtk-update-icon-cache", "-q", str(base / "icons" / "hicolor")]):
         try:
@@ -231,10 +238,11 @@ def add_menu_entry(appimage: str):
 
 
 def remove_menu_entry():
-    try:
-        _desktop_file().unlink()
-    except OSError:
-        pass
+    for name in ("raceoverlay", "raceanalysis"):
+        try:
+            _desktop_file(name).unlink()
+        except OSError:
+            pass
 
 
 def fmt_t(t: float) -> str:
@@ -1284,9 +1292,14 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(_btn("Open…", self._choose_csv), 1, 2)
         grid.setColumnStretch(1, 1)
         fl.addLayout(grid)
-        fl.addWidget(_btn("Import from GoPro card…", self._import_dialog,
-                          "Copy new recordings off the card into a folder per "
-                          "track day, match each to its data file, and sync"))
+        irow = QtWidgets.QHBoxLayout()
+        irow.addWidget(_btn("Import from GoPro card…", self._import_dialog,
+                            "Copy new recordings off the card into a folder per "
+                            "track day, match each to its data file, and sync"))
+        irow.addWidget(_btn("Analyze laps…", self._open_analysis,
+                            "Compare laps in Race Analysis: lap and sector "
+                            "times, where time was lost, synced video"))
+        fl.addLayout(irow)
         mrow = QtWidgets.QHBoxLayout()
         mrow.addWidget(_btn("Merge files…", self._merge_dialog,
                             "Play several video files as one (GoPro chapters, "
@@ -1843,6 +1856,20 @@ class MainWindow(QtWidgets.QMainWindow):
             if r == QtWidgets.QMessageBox.Yes:
                 return chapters
         return [path]
+
+    def _open_analysis(self):
+        if self.telem is None or not self.csv_path:
+            self._set_status("Open a data file first (and sync the video to see "
+                             "it in Race Analysis).")
+            return
+        from raceanalysis import app as analysis_app
+        try:
+            self.player.pause = True
+        except Exception:
+            pass
+        video = (list(self.parts), float(self.offset)) if self.synced and self.parts else None
+        self._analysis_win = analysis_app.open_window(
+            [(self.csv_path, self.telem, video)])
 
     def _import_dialog(self):
         dlg = ImportDialog(self)
@@ -2476,6 +2503,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if tgt:
             if os.path.abspath(tgt) != os.path.abspath(p) and not os.path.exists(tgt):
                 add_menu_entry(p)  # the old copy is gone: follow the move
+            elif not _desktop_file("raceanalysis").exists() and \
+                    os.path.abspath(tgt) == os.path.abspath(p):
+                add_menu_entry(p)  # menu entry from before Race Analysis existed
             return
         s = settings()
         if s.value("integration/asked", False, type=bool):
