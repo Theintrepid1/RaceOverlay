@@ -122,6 +122,9 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.lap_tree.header().setStretchLastSection(False)
         self.lap_tree.itemChanged.connect(self._lap_checked)
         self.lap_tree.currentItemChanged.connect(self._lap_selected)
+        # clicking the row you're already on brings it back if it was unticked
+        self.lap_tree.itemClicked.connect(
+            lambda it, col: col > 0 and self._lap_selected(it, None))
         tables.addWidget(self.lap_tree)
         cbox = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(cbox)
@@ -273,7 +276,6 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         best = a.ref.time
         bsec = [t for t, _ in a.best_sectors()]
         purple = QtGui.QColor("#b38cff")
-        cur = None
         for si, s in enumerate(a.sessions):
             vid = "video" if s.video else "no video"
             top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid})"])
@@ -287,8 +289,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 it = QtWidgets.QTreeWidgetItem(row)
                 it.setData(0, QtCore.Qt.UserRole, ("lap", ld.key))
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-                shown = ld.key in self.compare or ld is a.ref
-                it.setCheckState(0, QtCore.Qt.Checked if shown else QtCore.Qt.Unchecked)
+                it.setCheckState(0, QtCore.Qt.Unchecked)  # set in _restyle_laps
                 for c in range(1, 6):
                     it.setTextAlignment(c, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if ld is a.ref:
@@ -297,9 +298,6 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                     for c in range(6):
                         it.setFont(c, f)
                     it.setText(2, "ref")
-                if ld.key in self.compare:
-                    col = QtGui.QColor(SERIES[self.compare.index(ld.key)])
-                    it.setForeground(0, col)
                 for k, t in enumerate(ld.sectors):
                     if ld.timed and abs(t - bsec[k]) < 1e-9:
                         it.setForeground(3 + k, purple)
@@ -307,13 +305,40 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                     for c in range(6):
                         it.setForeground(c, QtGui.QColor(NEUTRAL))
                 top.addChild(it)
-                if ld.key == self.focus:
-                    cur = it
             top.setExpanded(True)
         for c in range(6):
             tree.resizeColumnToContents(c)
-        if cur is not None:
-            tree.setCurrentItem(cur)
+        tree.blockSignals(False)
+        self._restyle_laps()
+
+    def _lap_items(self):
+        tree = self.lap_tree
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                yield top.child(j)
+
+    def _restyle_laps(self):
+        """Check marks, colours and the current row, on the existing rows.
+        Never clears the tree, so it is safe to call after a click on it."""
+        a, tree = self.a, self.lap_tree
+        tree.blockSignals(True)
+        default = tree.palette().color(QtGui.QPalette.Text)
+        for it in self._lap_items():
+            key = it.data(0, QtCore.Qt.UserRole)[1]
+            ld = self._lap(key)
+            if ld is None:
+                continue
+            shown = key in self.compare or ld is a.ref
+            want = QtCore.Qt.Checked if shown else QtCore.Qt.Unchecked
+            if it.checkState(0) != want:
+                it.setCheckState(0, want)
+            if key in self.compare:
+                it.setForeground(0, QtGui.QColor(SERIES[self.compare.index(key)]))
+            elif ld.timed:
+                it.setForeground(0, default)
+            if key == self.focus and tree.currentItem() is not it:
+                tree.setCurrentItem(it)
         tree.blockSignals(False)
 
     def _lap_checked(self, it, col):
@@ -322,30 +347,42 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         key = data[1]
         ld = self._lap(key)
-        if ld is self.a.ref:
-            self._fill_laps()  # the reference is always shown
-            return
-        if it.checkState(0) == QtCore.Qt.Checked and key not in self.compare:
-            if len(self.compare) >= MAX_COMPARE:
-                self.compare.pop(0)
-            self.compare.append(key)
-        elif it.checkState(0) != QtCore.Qt.Checked and key in self.compare:
-            self.compare.remove(key)
-        self._fill_laps()
+        checked = it.checkState(0) == QtCore.Qt.Checked
+        if ld is not self.a.ref:  # the reference is always shown
+            if checked and key not in self.compare:
+                if len(self.compare) >= MAX_COMPARE:
+                    self.compare.pop(0)
+                self.compare.append(key)
+            elif not checked and key in self.compare:
+                self.compare.remove(key)
+        # Qt is still inside this click: update after it returns
+        QtCore.QTimer.singleShot(0, self._compare_changed)
+
+    def _compare_changed(self):
+        self._restyle_laps()
         self._draw_traces()
+        self._draw_map()
 
     def _lap_selected(self, it, _prev):
         if it is None:
             return
         data = it.data(0, QtCore.Qt.UserRole)
-        if not data or data[0] != "lap" or data[1] == self.focus:
+        if not data or data[0] != "lap":
             return
         self.focus = data[1]
         if self.focus not in self.compare and self._lap(self.focus) is not self.a.ref:
             if len(self.compare) >= MAX_COMPARE:
                 self.compare.pop(0)
             self.compare.append(self.focus)
-        self._refresh()
+        QtCore.QTimer.singleShot(0, self._focus_changed)
+
+    def _focus_changed(self):
+        self._restyle_laps()
+        self._draw_traces()
+        self._draw_map()
+        self._fill_corners()
+        self._load_video()
+        self.set_cursor(self.cursor_d)
 
     # ============================================================= traces ===
     def _draw_traces(self):
