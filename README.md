@@ -142,7 +142,8 @@ or with `raceoverlay --analysis [data.csv ...]` / `./launch.sh --analysis`.
 - **Turns:** with no setup, corners are found from speed dips and numbered
   C1, C2… **Track turns…** names them like the official map: load the
   track's map image, line it up by clicking the same spot on the image and on
-  your trace twice, then click each turn number. Saved per track and reused on
+  your trace twice, then click each turn number. Split turns work: type 4A in
+  "Next turn" before clicking it and the next click becomes 4B. Saved per track and reused on
   every visit (in `~/.local/share/raceoverlay/tracks/`).
 - **Per turn, for the selected lap:** time lost or gained in that turn's
   stretch of track, minimum speed, where braking started vs the reference, and

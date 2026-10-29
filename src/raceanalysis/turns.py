@@ -8,8 +8,9 @@
    do that twice (start/finish and a hairpin work well). The image is
    scaled and turned onto the trace.
 3. Place turns: click each turn number on the image; it snaps to the nearest
-   point of the trace and gets the next name (T1, T2…). Double-click a name
-   to rename it.
+   point of the trace and takes the name in "Next turn" (T1, T2…; type 4A
+   before a split turn and the next click gets 4B). Double-click a name in
+   the list to rename it.
 
 Saved per track (racecore.tracks), so the next visit already has them.
 """
@@ -69,6 +70,14 @@ class TurnsDialog(QtWidgets.QDialog):
                               "Click each turn number on the map")
         self.btn_place.setCheckable(True)
         side.addWidget(self.btn_place)
+        nrow = QtWidgets.QHBoxLayout()
+        nrow.addWidget(_note("Next turn"))
+        self.next_edit = QtWidgets.QLineEdit(profile.next_name())
+        self.next_edit.setToolTip("Name for the next turn you click. Type 4A for a "
+                                  "split turn; the one after becomes 4B.")
+        self.next_edit.textEdited.connect(lambda _t: self._hint())
+        nrow.addWidget(self.next_edit, 1)
+        side.addLayout(nrow)
         side.addWidget(_btn("Start from detected corners", self._from_detected,
                             "Add a turn at every corner found from your speed"))
         orow = QtWidgets.QHBoxLayout()
@@ -197,8 +206,9 @@ class TurnsDialog(QtWidgets.QDialog):
                                  "<b>map image</b> (start/finish, a hairpin apex…).")
         elif self.mode == "place":
             self.msg.setText(f"Click turn numbers on the map; each snaps to your trace. "
-                             f"Next: <b>{self.profile.next_name()}</b>. Click "
-                             "\"Place turns\" again to stop.")
+                             f"Next: <b>{self._next()}</b> (change it in Next turn, "
+                             "e.g. 4A for a split turn). Click \"Place turns\" "
+                             "again to stop.")
         elif self.img is None:
             self.msg.setText("Load the track's map image (with turn numbers), or start "
                              "from your detected corners and rename them.")
@@ -264,9 +274,13 @@ class TurnsDialog(QtWidgets.QDialog):
         """Add a turn at the trace point nearest pt."""
         world = self.trace[tracks.snap(self.trace, pt)]
         lat, lon = tracks.to_latlon([world], self.profile.lat0, self.profile.lon0)[0]
-        self.profile.turns.append(tracks.Turn(self.profile.next_name(), float(lat), float(lon)))
+        self.profile.turns.append(tracks.Turn(self._next(), float(lat), float(lon)))
+        self.next_edit.setText(self.profile.next_name())
         self._draw()
         self._hint()
+
+    def _next(self) -> str:
+        return self.next_edit.text().strip() or self.profile.next_name()
 
     def _from_detected(self):
         a = self.a
@@ -280,6 +294,7 @@ class TurnsDialog(QtWidgets.QDialog):
             y = float(np.interp(c.apex_d, a._ref_s, a.ref.xy[:, 1]))
             lat, lon = tracks.to_latlon([[x, y]], *a.origin)[0]
             self.profile.turns.append(tracks.Turn(self.profile.next_name(), float(lat), float(lon)))
+        self.next_edit.setText(self.profile.next_name())
         self._draw()
         self.msg.setText(f"Added {len(detected)} turns from your corners. Rename them "
                          "to the track's numbers, add the ones it missed with "
@@ -290,17 +305,21 @@ class TurnsDialog(QtWidgets.QDialog):
         name = it.text().strip()
         if 0 <= i < len(self.profile.turns) and name:
             self.profile.turns[i].name = name
+            if i == len(self.profile.turns) - 1:
+                self.next_edit.setText(self.profile.next_name())
             self._draw()
 
     def _delete(self):
         i = self.lst.currentRow()
         if 0 <= i < len(self.profile.turns):
             del self.profile.turns[i]
+            self.next_edit.setText(self.profile.next_name())
             self._draw()
             self._hint()
 
     def _clear(self):
         self.profile.turns.clear()
+        self.next_edit.setText(self.profile.next_name())
         self._draw()
         self._hint()
 

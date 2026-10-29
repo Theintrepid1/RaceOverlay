@@ -87,6 +87,26 @@ def snap(path_xy: np.ndarray, pt) -> int:
     return int(np.argmin(d))
 
 
+# ------------------------------------------------------------ turn names ---
+# "T4", "4", "Turn 4", "T4A", "4b": optional prefix, number, optional letter.
+_NAME_RE = re.compile(r"(.*?)(\d+)([A-Za-z]?)")
+
+
+def name_after(name: str) -> str | None:
+    """The name that follows `name`: a split turn's next letter (4A -> 4B,
+    T7b -> T7c), else the next number (T4 -> T5, Turn 9 -> Turn 10). None
+    for names without a number ("Oak Tree")."""
+    m = _NAME_RE.fullmatch(name.strip())
+    if not m:
+        return None
+    prefix, num, letter = m.groups()
+    if letter:
+        if letter in "zZ":
+            return f"{prefix}{int(num) + 1}"
+        return f"{prefix}{num}{chr(ord(letter) + 1)}"
+    return f"{prefix}{int(num) + 1}"
+
+
 # --------------------------------------------------------------- profiles ---
 
 @dataclass
@@ -122,9 +142,16 @@ class TrackProfile:
         return to_xy([t.lat for t in self.turns], [t.lon for t in self.turns], lat0, lon0)
 
     def next_name(self) -> str:
-        nums = [int(m.group(1)) for t in self.turns
-                if (m := re.fullmatch(r"T(\d+)[a-z]?", t.name))]
-        return f"T{max(nums) + 1 if nums else 1}"
+        """What the next placed turn is called: carries on from the last one
+        (T4 -> T5, 4A -> 4B, T7b -> T7c), or T1 for the first."""
+        if not self.turns:
+            return "T1"
+        nxt = name_after(self.turns[-1].name)
+        if nxt:
+            return nxt
+        nums = [int(m.group(2)) for t in self.turns
+                if (m := _NAME_RE.fullmatch(t.name.strip()))]
+        return f"T{max(nums) + 1 if nums else len(self.turns) + 1}"
 
     # ----------------------------------------------------------- storage
     def to_dict(self) -> dict:

@@ -93,3 +93,42 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_split_turn_names():
+    after = tracks.name_after
+    assert after("T4") == "T5" and after("4") == "5" and after("Turn 9") == "Turn 10"
+    assert after("4A") == "4B" and after("T4a") == "T4b" and after("T12B") == "T12C"
+    assert after("4Z") == "5"
+    assert after("Oak Tree") is None
+    p = tracks.TrackProfile("VIR", LAT0, LON0)
+    assert p.next_name() == "T1"
+    for name in ("T1", "T2", "T3", "4A"):
+        p.turns.append(tracks.Turn(name, LAT0, LON0))
+    assert p.next_name() == "4B"
+    p.turns.append(tracks.Turn("4B", LAT0, LON0))
+    p.turns.append(tracks.Turn("Oak Tree", LAT0, LON0))
+    assert p.next_name() == "T5"  # carries on from the highest number
+
+
+def test_split_turns_get_their_own_stretch():
+    tel = _session([(None, 0), (1, 8.0), (None, 0)], noise=0.5)
+    a = analysis.Analysis()
+    a.add(tel, "s1.csv")
+    det = [c.apex_d for c in a.corners]
+    ref = a.ref
+    # corner 2 placed as a split: 4A 30 m before its apex, 4B 30 m after
+    at = det[:1] + [det[1] - 30, det[1] + 30] + det[2:]
+    names = ["T1", "4A", "4B", "T5", "T6"]
+    pts = [(np.interp(d, a._ref_s, ref.xy[:, 0]), np.interp(d, a._ref_s, ref.xy[:, 1])) for d in at]
+    ll = tracks.to_latlon(np.array(pts), *a.origin)
+    a.use_profile(tracks.TrackProfile("S", LAT0, LON0,
+                                      [tracks.Turn(n, float(la), float(lo))
+                                       for n, (la, lo) in zip(names, ll)]))
+    got = [(c.name, round(c.apex_d)) for c in a.corners]
+    assert [c.name for c in a.corners] == names, got
+    c4a, c4b = a.corners[1], a.corners[2]
+    assert c4a.end_d == c4b.start_d and c4b.start_d - c4a.apex_d > 25  # split halfway
+    slow = next(ld for ld in a.timed_laps() if ld.lap.n == 2)
+    res = a.corner_results(slow)
+    assert abs(sum(r.lost for r in res) - a.delta(slow)[-1]) < 0.05
