@@ -106,7 +106,18 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.map.hideAxis("bottom")
         self.map.setMenuEnabled(False)
         self.map.scene().sigMouseClicked.connect(self._map_clicked)
-        left.addWidget(self.map)
+        self.gg = pg.PlotWidget()
+        self.gg.setAspectLocked(True)
+        self.gg.setMenuEnabled(False)
+        for ax in ("left", "bottom"):
+            self.gg.getAxis(ax).enableAutoSIPrefix(False)
+        self.gg.setLabel("bottom", "Lateral g (right +)")
+        self.gg.setLabel("left", "Brake – / accel + (g)")
+        self.gg_turn: int | None = None   # turn highlighted on the g-g diagram
+        self.left_tabs = QtWidgets.QTabWidget()
+        self.left_tabs.addTab(self.map, "Track map")
+        self.left_tabs.addTab(self.gg, "g-g (grip)")
+        left.addWidget(self.left_tabs)
         left.setSizes([420, 420])
         outer.addWidget(left)
 
@@ -138,7 +149,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         rsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         tables = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.lap_tree = QtWidgets.QTreeWidget()
-        self.lap_tree.setHeaderLabels(["Lap", "Gap", "S1", "S2", "S3"])
+        self.lap_tree.setHeaderLabels(["Lap", "Gap", "Grip", "S1", "S2", "S3"])
+        self.lap_tree.headerItem().setToolTip(
+            2, "Grip used while cornering and braking, against the best you've shown "
+               "the car can do (100%)")
         self.lap_tree.setRootIsDecorated(True)
         self.lap_tree.setUniformRowHeights(True)
         self.lap_tree.header().setStretchLastSection(False)
@@ -153,7 +167,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         cl.setContentsMargins(0, 0, 0, 0)
         self.corner_lbl = _note("")
         cl.addWidget(self.corner_lbl)
-        self.corner_tbl = QtWidgets.QTableWidget(0, 5)
+        self.corner_tbl = QtWidgets.QTableWidget(0, 6)
         self.corner_tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.corner_tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.corner_tbl.verticalHeader().setVisible(False)
@@ -167,7 +181,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.p_delta = self.traces.addPlot(row=0, col=0)
         self.p_speed = self.traces.addPlot(row=1, col=0)
         self.p_long = self.traces.addPlot(row=2, col=0)
-        self.plots = [self.p_delta, self.p_speed, self.p_long]
+        self.p_grip = self.traces.addPlot(row=3, col=0)
+        self.plots = [self.p_delta, self.p_speed, self.p_long, self.p_grip]
         for p in self.plots:
             p.showGrid(x=True, y=True, alpha=0.15)
             for ax in ("left", "bottom"):
@@ -178,6 +193,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 p.setXLink(self.p_delta)
         self.p_delta.setLabel("left", "Delta vs ref (s)")
         self.p_long.setLabel("left", "Brake – / accel + (g)")
+        self.p_grip.setLabel("left", "Grip used (%)")
         self.cursors = []
         for p in self.plots:
             ln = pg.InfiniteLine(angle=90, movable=True,
@@ -397,6 +413,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._fill_laps()
         self._draw_traces()
         self._draw_map()
+        self._draw_gg()
         self._fill_corners()
         self._summary()
         self._load_video()
@@ -437,28 +454,30 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             for ld in [x for x in a.laps if x.session == si]:
                 row = [f"Lap {ld.lap.n}  –  {fmt_lap(ld.time)}",
                        "" if ld is a.ref else (fmt_gap(ld.time - best) if ld.timed else "slow")]
+                lg = a.lap_grip(ld)
+                row += [f"{lg * 100:.0f}%" if lg is not None else ""]
                 row += [f"{t:.2f}" for t in ld.sectors]
                 it = QtWidgets.QTreeWidgetItem(row)
                 it.setData(0, QtCore.Qt.UserRole, ("lap", ld.key))
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                 it.setCheckState(0, QtCore.Qt.Unchecked)  # set in _restyle_laps
-                for c in range(1, 5):
+                for c in range(1, 6):
                     it.setTextAlignment(c, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if ld is a.ref:
                     f = it.font(0)
                     f.setBold(True)
-                    for c in range(5):
+                    for c in range(6):
                         it.setFont(c, f)
                     it.setText(1, "ref")
                 for k, t in enumerate(ld.sectors):
                     if ld.timed and abs(t - bsec[k]) < 1e-9:
-                        it.setForeground(2 + k, purple)
+                        it.setForeground(3 + k, purple)
                 if not ld.timed:
-                    for c in range(5):
+                    for c in range(6):
                         it.setForeground(c, QtGui.QColor(NEUTRAL))
                 top.addChild(it)
             top.setExpanded(True)
-        for c in range(5):
+        for c in range(6):
             tree.resizeColumnToContents(c)
         tree.blockSignals(False)
         self._restyle_laps()
@@ -514,6 +533,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._restyle_laps()
         self._draw_traces()
         self._draw_map()
+        self._draw_gg()
 
     def _lap_selected(self, it, _prev):
         if it is None:
@@ -532,6 +552,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._restyle_laps()
         self._draw_traces()
         self._draw_map()
+        self._draw_gg()
         self._fill_corners()
         self._load_video()
         self.set_cursor(self.cursor_d)
@@ -547,7 +568,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         x = self._x(a.grid)
         unit = "mph" if self.use_mph else "km/h"
         self.p_speed.setLabel("left", f"Speed ({unit})")
-        self.p_long.setLabel("bottom", f"Distance ({self._dist_unit()})")
+        self.p_grip.setLabel("bottom", f"Distance ({self._dist_unit()})")
         # corner bands, shaded every other one, named on the speed trace
         for c in a.corners:
             if c.n % 2 == 0:
@@ -569,6 +590,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         g = a.channel_on_grid(a.ref, "lon_g")
         if g is not None:
             self.p_long.plot(x, g, pen=rp)
+        self.p_grip.addLine(y=100, pen=pg.mkPen("#6b6a64", style=QtCore.Qt.DashLine))
+        u = a.grip_on_grid(a.ref)
+        if u is not None:
+            self.p_grip.plot(x, u * 100, pen=rp, connect="finite")
         for i, key in enumerate(self.compare):
             ld = self._lap(key)
             if ld is None:
@@ -579,6 +604,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             g = a.channel_on_grid(ld, "lon_g")
             if g is not None:
                 self.p_long.plot(x, g, pen=pen)
+            u = a.grip_on_grid(ld)
+            if u is not None:
+                self.p_grip.plot(x, u * 100, pen=pen, connect="finite")
+        self.p_grip.setYRange(0, 115, padding=0)
         vr = self.p_speed.viewRange()[1]
         for c in a.corners:
             t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 0))
@@ -634,6 +663,66 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                                     symbolPen=pg.mkPen("#0b0b0b", width=2),
                                     symbolBrush=pg.mkBrush(col))
 
+    # ================================================================ g-g ===
+    def _draw_gg(self):
+        self.gg.clear()
+        self.gg_marker = None
+        a = self.a
+        if a.ref is None:
+            return
+        grid_pen = pg.mkPen("#3a3a37", width=1)
+        th = np.linspace(0, 2 * np.pi, 121)
+        for r in (0.5, 1.0, 1.5):
+            self.gg.plot(r * np.cos(th), r * np.sin(th), pen=grid_pen)
+            lbl = pg.TextItem(f"{r:g} g", color="#6b6a64", anchor=(0, 1))
+            lbl.setPos(r * 0.71, r * 0.71)
+            self.gg.addItem(lbl)
+        self.gg.plot([-1.6, 1.6], [0, 0], pen=grid_pen)
+        self.gg.plot([0, 0], [-1.6, 1.6], pen=grid_pen)
+        for txt, x, y, anc in (("Braking", 0, -1.55, (0.5, 0)), ("Accel", 0, 1.55, (0.5, 1)),
+                               ("Left", -1.55, 0, (0, 1)), ("Right", 1.55, 0, (1, 1))):
+            t = pg.TextItem(txt, color="#8a8983", anchor=anc)
+            t.setPos(x, y)
+            self.gg.addItem(t)
+        if a.envelope is not None:
+            o = a.envelope.outline()
+            self.gg.plot(o[:, 0], o[:, 1], pen=pg.mkPen(REF_COLOR, width=2,
+                                                        style=QtCore.Qt.DashLine))
+        ld = self._lap(self.focus) if self.focus else a.ref
+        c = next((c for c in a.corners if c.n == self.gg_turn), None)
+        for lap, col, size in ((a.ref, REF_COLOR, 3),
+                               (ld if ld is not a.ref else None, None, 4)):
+            if lap is None or lap.lat_g is None or lap.lon_g is None:
+                continue
+            col = col or (SERIES[self.compare.index(lap.key)]
+                          if lap.key in self.compare else SERIES[0])
+            fast = lap.v > 30
+            if c is None:
+                sel = fast
+                alpha = 70 if lap is a.ref and ld is not a.ref else 170
+                self.gg.plot(lap.lat_g[sel], lap.lon_g[sel], pen=None, symbol="o",
+                             symbolSize=size, symbolPen=None,
+                             symbolBrush=pg.mkBrush(QtGui.QColor(col).red(),
+                                                    QtGui.QColor(col).green(),
+                                                    QtGui.QColor(col).blue(), alpha))
+            else:
+                inside = fast & (lap.d >= c.start_d) & (lap.d <= c.end_d)
+                self.gg.plot(lap.lat_g[fast & ~inside], lap.lon_g[fast & ~inside], pen=None,
+                             symbol="o", symbolSize=3, symbolPen=None,
+                             symbolBrush=pg.mkBrush(120, 120, 115, 40))
+                self.gg.plot(lap.lat_g[inside], lap.lon_g[inside],
+                             pen=pg.mkPen(col, width=1.2), symbol="o", symbolSize=size + 2,
+                             symbolPen=None, symbolBrush=pg.mkBrush(col))
+        if c is not None:
+            t = pg.TextItem(f"{c.name}: this lap vs reference (grey)", color="#d8d7d0",
+                            anchor=(0, 0))
+            t.setPos(-1.6, 1.6)
+            self.gg.addItem(t)
+        self.gg_marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=13,
+                                      symbolPen=pg.mkPen("#0b0b0b", width=2),
+                                      symbolBrush=pg.mkBrush(CURSOR))
+        self.gg.setRange(xRange=(-1.6, 1.6), yRange=(-1.6, 1.6), padding=0.02)
+
     def _map_clicked(self, ev):
         a = self.a
         if a.ref is None or ev.button() != QtCore.Qt.LeftButton:
@@ -652,7 +741,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         a = self.a
         u = self._dist_unit()
         su = "mph" if self.use_mph else "km/h"
-        t.setHorizontalHeaderLabels(["Corner", "Time vs ref", f"Min speed ({su})",
+        t.setHorizontalHeaderLabels(["Corner", "Time vs ref", "Grip used", f"Min speed ({su})",
                                      f"Braked ({u} vs ref)", "Best anyone"])
         if ld is None or a.ref is None:
             self.corner_lbl.setText("")
@@ -680,7 +769,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                          f"{abs(diff):.0f} earlier" if diff < 0 else "same")
             else:
                 brake = "no hard braking"
-            cells = [lr, fmt_gap(cr.lost),
+            g = cr.grip
+            gtxt = (f"{g.used * 100:.0f}% / {g.used_ref * 100:.0f}%"
+                    if g is not None and g.used is not None and g.used_ref is not None else "")
+            cells = [lr, fmt_gap(cr.lost), gtxt,
                      f"{self._spd(cr.vmin):.0f} / {self._spd(cr.vmin_ref):.0f}",
                      brake, fmt_gap(cr.best_lost)]
             for col, txt in enumerate(cells):
@@ -689,6 +781,13 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 if col == 1:
                     it.setForeground(QtGui.QColor(LOSS if cr.lost > 0.05 else
                                                   GAIN if cr.lost < -0.05 else NEUTRAL))
+                if col == 2 and g is not None and g.used is not None and g.used_ref is not None:
+                    it.setForeground(QtGui.QColor(LOSS if g.used < g.used_ref - 0.05 else
+                                                  GAIN if g.used > g.used_ref + 0.05 else NEUTRAL))
+                    it.setToolTip(f"Grip used while cornering/braking: this lap "
+                                  f"{g.used:.0%}, reference {g.used_ref:.0%}. Peak "
+                                  f"{g.peak_g:.2f} g vs {g.peak_g_ref:.2f} g; below 80% "
+                                  f"for {g.soft_s:.1f} s vs {g.soft_s_ref:.1f} s.")
                 if col > 0:
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(r, col, it)
@@ -701,6 +800,12 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         n = it.data(QtCore.Qt.UserRole)
         c = next((c for c in self.a.corners if c.n == n), None)
         if c is None:
+            return
+        # clicking the turn already shown on the g-g goes back to the whole lap
+        self.gg_turn = None if self.gg_turn == n else n
+        self._draw_gg()
+        if self.gg_turn is None:
+            self.p_delta.setXRange(0, float(self._x(self.a.length)), padding=0.01)
             return
         # land on the approach so the video shows the braking zone
         start = max(c.start_d, c.apex_d - 250.0)
@@ -728,6 +833,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         k = min(k, len(ld.xy) - 1)
         if hasattr(self, "marker"):
             self.marker.setData([ld.xy[k, 0]], [ld.xy[k, 1]])
+        if getattr(self, "gg_marker", None) is not None and ld.lat_g is not None \
+                and ld.lon_g is not None:
+            self.gg_marker.setData([float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
+                                   [float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
         t_into = a.time_at(ld, d)
         spd = self._spd(np.interp(d, a.grid, a.channel_on_grid(ld, "speed")))
         dl = float(np.interp(d, a.grid, a.delta(ld))) if ld is not a.ref else 0.0

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import grip as gripmod
 from .laps import CornerModel, Lap, LapModel
 from .telemetry import Telemetry
 
@@ -111,6 +112,7 @@ class CornerResult:
     brake_d: float | None     # where braking started, metres along the path
     brake_d_ref: float | None
     best_lost: float          # the fastest any lap went through here vs reference
+    grip: "gripmod.TurnGrip | None" = None
 
 
 class Analysis:
@@ -125,6 +127,7 @@ class Analysis:
         self._ref_path: np.ndarray | None = None
         self._ref_s: np.ndarray | None = None
         self.profile = None   # racecore.tracks.TrackProfile with named turns
+        self.envelope: gripmod.Envelope | None = None
 
     def use_profile(self, profile):
         """Take corners from a track profile's turns (None = detect them)."""
@@ -196,7 +199,22 @@ class Analysis:
         timed = [ld for ld in self.laps if ld.timed]
         if not timed:
             return
+        self._build_envelope(timed)
         self.set_reference(min(timed, key=lambda ld: ld.time))
+
+    def _build_envelope(self, laps):
+        """Grip envelope from every timed lap of every session."""
+        self.envelope = None
+        pairs = [(ld.lat_g, ld.lon_g, ld.v) for ld in laps
+                 if ld.lat_g is not None and ld.lon_g is not None]
+        if not pairs:
+            return
+        try:
+            self.envelope = gripmod.build_envelope(
+                np.concatenate([p[0] for p in pairs]), np.concatenate([p[1] for p in pairs]),
+                np.concatenate([p[2] for p in pairs]))
+        except ValueError:
+            self.envelope = None
 
     def set_reference(self, ref: LapData):
         self.ref = ref
@@ -284,6 +302,34 @@ class Analysis:
             return None
         d = ld.d + np.arange(len(ld.d)) * 1e-6
         return np.interp(self.grid, d, x)
+
+    def dt_on_grid(self, ld: LapData) -> np.ndarray:
+        """Seconds the lap spent on each grid step."""
+        return np.gradient(ld.time_at)
+
+    def grip_on_grid(self, ld: LapData) -> np.ndarray | None:
+        """Fraction of the envelope used at each grid point, NaN where the
+        car wasn't cornering or braking (straights, pure acceleration)."""
+        if self.envelope is None:
+            return None
+        lat, lon = self.channel_on_grid(ld, "lat_g"), self.channel_on_grid(ld, "lon_g")
+        if lat is None or lon is None:
+            return None
+        u = self.envelope.used(lat, lon)
+        u[~gripmod._working(lat, lon)] = np.nan
+        return u
+
+    def lap_grip(self, ld: LapData) -> float | None:
+        """Time-weighted grip used over the whole lap while working."""
+        if self.envelope is None or ld.lat_g is None:
+            return None
+        lat, lon = self.channel_on_grid(ld, "lat_g"), self.channel_on_grid(ld, "lon_g")
+        return gripmod.stretch_grip(self.envelope, lat, lon, self.dt_on_grid(ld))[0]
+
+    def _turn_grip(self, ld: LapData, i0: int, i1: int):
+        lat, lon = self.channel_on_grid(ld, "lat_g"), self.channel_on_grid(ld, "lon_g")
+        sl = slice(i0, i1 + 1)
+        return gripmod.stretch_grip(self.envelope, lat[sl], lon[sl], self.dt_on_grid(ld)[sl])
 
     def timed_laps(self) -> list[LapData]:
         return [ld for ld in self.laps if ld.timed]
@@ -381,9 +427,14 @@ class Analysis:
             near = slice(max(i0, int(np.searchsorted(self.grid, c.apex_d - 120))),
                          min(i1 + 1, int(np.searchsorted(self.grid, c.apex_d + 120)) + 1))
             best = min(float((self.delta(x)[i1] - self.delta(x)[i0])) for x in timed)
+            g = None
+            if self.envelope is not None and ld.lat_g is not None and self.ref.lat_g is not None:
+                u, pk, soft = self._turn_grip(ld, i0, i1)
+                ur, pkr, softr = self._turn_grip(self.ref, i0, i1)
+                g = gripmod.TurnGrip(u, ur, pk, pkr, soft, softr)
             out.append(CornerResult(c, lost, float(v[near].min()), float(vr[near].min()),
                                     self._brake_point(ld, c), self._brake_point(self.ref, c),
-                                    best))
+                                    best, g))
         return out
 
 

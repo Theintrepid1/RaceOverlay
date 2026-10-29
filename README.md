@@ -149,6 +149,18 @@ or with `raceoverlay --analysis [data.csv ...]` / `./launch.sh --analysis`.
   stretch of track, minimum speed, where braking started vs the reference, and
   the best any lap did there. Sorted worst first; click one to jump the video
   to its braking zone.
+- **Grip used:** an envelope of the most grip you've shown the car can do in
+  every direction (cornering, braking, trail-braking), built from all loaded
+  laps. Grip used = combined g ÷ that envelope, so 100% is as hard as you've
+  ever pushed that way; straights and pure acceleration (engine-limited) are
+  left out. Shown per lap in the lap list, per turn (this lap / reference) in
+  the turns table, and along the lap as a trace.
+- **g-g (grip) tab:** the envelope (dashed) with the selected lap and the
+  reference plotted inside it; click a turn in the table to show just that
+  turn's path, again to go back to the whole lap. It's relative to your own
+  data, not the tyre's absolute limit, and grows as you push harder. g comes
+  from the data logger (on every lap); on test data the GoPro's accelerometer
+  agreed within ~0.05 g in corners but read ~0.1 g more under braking.
 - **Track map:** coloured where the selected lap gained (green) or lost (red)
   time; click it to move the cursor.
 - **Video:** the session's synced video follows the cursor, and the cursor
