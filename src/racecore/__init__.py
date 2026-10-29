@@ -6,4 +6,4 @@ Logger parsing and g-sensor alignment (telemetry), lap and corner detection
 (laps), GoPro GPMF telemetry (gpmf), and GoPro-to-logger sync (gosync).
 Nothing here imports Qt or PIL, so it is safe for any front end or worker.
 """
-from . import telemetry, laps, gpmf  # noqa: F401
+from . import telemetry, laps, gpmf, gosync  # noqa: F401

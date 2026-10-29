@@ -94,9 +94,32 @@ def read_sensors(path: str, keys=("ACCL", "GYRO", "GPS5")) -> dict[str, SensorSt
     index = _gpmd_stream_index(path)
     if index is None:
         return {}
+    return _decode_packets(_packets(path, index), keys)
+
+
+def read_sensors_dump(path: str, keys=("ACCL", "GYRO", "GPS5"),
+                      packet_s: float = 1.001) -> dict[str, SensorStream]:
+    """Like read_sensors(), for a bare gpmd track saved without its MP4
+    (`ffmpeg -i GH010009.MP4 -map 0:<gpmd> -c copy -f rawvideo out.gpmd`).
+
+    The dump has no packet timestamps, so each top-level DEVC is taken as
+    one packet of `packet_s` seconds (GoPro writes one per 1001 ms).
+    """
+    with open(path, "rb") as fh:
+        buf = fh.read()
+    pkts = []
+    for k, typ, size, rep, body in _walk(buf):
+        if k != "DEVC":
+            continue
+        head = struct.pack(">4scBH", b"DEVC", typ.encode("latin-1"), size, rep)
+        pkts.append((len(pkts) * packet_s, packet_s, head + body))
+    return _decode_packets(pkts, keys)
+
+
+def _decode_packets(packets, keys) -> dict[str, SensorStream]:
     chunks: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
     orin: dict[str, str] = {}
-    for start, dur, payload in _packets(path, index):
+    for start, dur, payload in packets:
         for k, _, _, _, devc in _walk(payload):
             if k != "DEVC":
                 continue
