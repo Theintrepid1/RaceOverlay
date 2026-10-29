@@ -31,6 +31,7 @@ from raceoverlay.syncgui import pick_file, preview_mode, settings
 
 from .common import FT, INK_DIM, MAX_COMPARE, MPH, REF_COLOR, SERIES, fmt_lap, session_name
 from .pages.corners import CornersPage
+from .pages.day import DayPage
 from .pages.engine import EnginePage
 from .pages.laps import LapsPage
 from .pages.overview import OverviewPage
@@ -165,7 +166,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
         self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self), EnginePage(self),
-                      TrackPage(self)]
+                      DayPage(self), TrackPage(self)]
         for p in self.pages:
             self.tabs.addTab(p, p.title.replace("&", "&&"))
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -844,6 +845,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.status(f"Video synced to {s.name} (offset {res.offset:+.2f} s).")
 
     def closeEvent(self, ev):
+        self._page(DayPage).flush()
         tp = self._page(TrackPage)
         if tp.editor.dirty:
             r = QtWidgets.QMessageBox.question(

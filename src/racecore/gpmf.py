@@ -146,3 +146,53 @@ def _decode_packets(packets, keys) -> dict[str, SensorStream]:
     return {k: SensorStream(k, np.concatenate([c[0] for c in v]),
                             np.vstack([c[1] for c in v]), orin.get(k, ""))
             for k, v in chunks.items()}
+
+
+def _gps_time_in(packets):
+    """(video seconds, UTC time) of the first GPS time stamp written with a
+    2D/3D fix. GoPro writes GPSU ("yymmddhhmmss.sss", UTC) once a second
+    in the GPS stream; without a fix it's the camera's guess, so skipped."""
+    import datetime as dt
+    for start, _dur, payload in packets:
+        for k, _, _, _, devc in _walk(payload):
+            if k != "DEVC":
+                continue
+            for k2, _, _, _, strm in _walk(devc):
+                if k2 != "STRM":
+                    continue
+                gpsu, fix = None, None
+                for k3, typ, size, rep, body in _walk(strm):
+                    if k3 == "GPSU":
+                        gpsu = body[:size * rep].decode("latin-1", "replace").strip("\x00 ")
+                    elif k3 == "GPSF":
+                        v = _decode(typ, size, rep, body)
+                        fix = int(v.reshape(-1)[0]) if v is not None and v.size else None
+                if not gpsu or (fix is not None and fix < 2):
+                    continue
+                try:
+                    t = dt.datetime.strptime(gpsu[:16], "%y%m%d%H%M%S.%f")
+                except ValueError:
+                    continue
+                return start, t.replace(tzinfo=dt.timezone.utc)
+    return None
+
+
+def gps_time(path: str):
+    """(video seconds, UTC datetime) from a GoPro MP4's GPS clock, or None
+    (GPS off, no fix, or no gpmd track)."""
+    index = _gpmd_stream_index(path)
+    if index is None:
+        return None
+    return _gps_time_in(_packets(path, index))
+
+
+def gps_time_dump(path: str, packet_s: float = 1.001):
+    """gps_time() for a bare gpmd dump (see read_sensors_dump)."""
+    with open(path, "rb") as fh:
+        buf = fh.read()
+    pkts = []
+    for k, typ, size, rep, body in _walk(buf):
+        if k == "DEVC":
+            head = struct.pack(">4scBH", b"DEVC", typ.encode("latin-1"), size, rep)
+            pkts.append((len(pkts) * packet_s, packet_s, head + body))
+    return _gps_time_in(pkts)
