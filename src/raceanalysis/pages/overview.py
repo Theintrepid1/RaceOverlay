@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtWidgets
 
 from raceoverlay.syncgui import _btn, _note
 
-from ..common import (INK, INK_DIM, INK_FAINT, LOSS, NEUTRAL, PANEL, PURPLE, REF_COLOR,
+from ..common import (INK, INK_DIM, INK_FAINT, LOSS, PANEL, PURPLE, REF_COLOR,
                       fmt_gap, fmt_lap)
 from ..laplist import LapTree
 
@@ -188,7 +188,7 @@ class OverviewPage(QtWidgets.QWidget):
         self.chart.setMouseEnabled(False, False)
         self.chart.hideButtons()
         self.chart.showGrid(y=True, alpha=0.15)
-        self.chart.getAxis("bottom").setStyle(showValues=False)
+        self.chart.getAxis("bottom").enableAutoSIPrefix(False)
         self.chart.setLabel("left", "Lap time")
         self.chart.scene().sigMouseClicked.connect(self._chart_clicked)
         rl.addWidget(self.chart, 3)
@@ -246,47 +246,54 @@ class OverviewPage(QtWidgets.QWidget):
         self.c_laps.set(f"{len(timed)}", f"timed, {n_s} session{'s' if n_s != 1 else ''}")
 
     def _chart(self):
+        """Lap times as a line per session (slow laps left out of the line),
+        dots coloured like everywhere else; click a dot to pick that lap."""
         w, a = self.win, self.win.a
         self.chart.clear()
-        self._bars = []
+        self._bars = []              # (x, lap key) for clicks
         timed = a.timed_laps()
         if not timed:
+            self.chart.getAxis("bottom").setTicks([[]])
             return
         fastest = min(ld.time for ld in timed)
-        cap = fastest * 1.25
+        slowest = max(ld.time for ld in timed)
+        ticks = []
         x = 0.0
-        for si, s in enumerate(a.sessions):
+        for si in range(len(a.sessions)):
             laps = [ld for ld in a.laps if ld.session == si]
             if si:
                 self.chart.addItem(pg.InfiniteLine(pos=x - 0.75, angle=90,
                                                    pen=pg.mkPen("#3a3a37", style=QtCore.Qt.DashLine)))
-            lbl = pg.TextItem(s.name, color=INK_DIM, anchor=(0, 0))
-            lbl.setPos(x - 0.4, cap)
-            self.chart.addItem(lbl)
+            xs, ys = [], []
             for ld in laps:
-                h = min(ld.time, cap)
-                if ld.key == w.focus or ld.key in w.compare:
-                    col = w.color(ld.key)
-                elif ld is a.ref:
-                    col = REF_COLOR
-                elif not ld.timed:
-                    col = "#3a3a37"
-                else:
-                    col = "#4b5563"
-                if ld.timed and abs(ld.time - fastest) < 1e-9 and ld.key != w.focus:
-                    col = PURPLE
-                bar = pg.BarGraphItem(x=[x], height=[h - fastest * 0.97], y0=[fastest * 0.97],
-                                      width=0.75, brush=pg.mkBrush(col), pen=pg.mkPen(None))
-                self.chart.addItem(bar)
-                txt = pg.TextItem(f"L{ld.lap.n}", color=INK if ld.timed else NEUTRAL,
-                                  anchor=(0.5, 1))
-                txt.setPos(x, fastest * 0.97)
-                self.chart.addItem(txt)
-                self._bars.append((x, ld.key))
+                ticks.append((x, f"L{ld.lap.n}"))
+                if ld.timed:
+                    xs.append(x)
+                    ys.append(ld.time)
+                    self._bars.append((x, ld.key))
                 x += 1.0
+            if xs:
+                self.chart.plot(xs, ys, pen=pg.mkPen("#6b6a64", width=2))
             x += 0.6
-        self.chart.setYRange(fastest * 0.97, cap * 1.01, padding=0)
-        self.chart.setXRange(-0.8, x - 0.2, padding=0)
+        # dots on top: fastest purple, reference grey, picked laps in their colours
+        for bx, key in self._bars:
+            ld = w.lap(key)
+            if key == w.focus or key in w.compare:
+                col, size = w.color(key), 13
+            elif ld is a.ref:
+                col, size = REF_COLOR, 11
+            elif abs(ld.time - fastest) < 1e-9:
+                col, size = PURPLE, 11
+            else:
+                col, size = "#9a9993", 8
+            if abs(ld.time - fastest) < 1e-9 and key != w.focus:
+                col = PURPLE
+            self.chart.plot([bx], [ld.time], pen=None, symbol="o", symbolSize=size,
+                            symbolPen=pg.mkPen("#0b0b0b", width=1.5), symbolBrush=pg.mkBrush(col))
+        self.chart.getAxis("bottom").setTicks([ticks])
+        pad = max(0.5, (slowest - fastest) * 0.08)
+        self.chart.setYRange(fastest - pad, slowest + pad, padding=0)
+        self.chart.setXRange(-0.6, x - 0.4, padding=0)
 
     def _chart_clicked(self, ev):
         if ev.button() != QtCore.Qt.LeftButton or not self._bars:
