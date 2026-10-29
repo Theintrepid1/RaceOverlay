@@ -158,6 +158,7 @@ def main():
            "--distpath", str(work / "dist"), "--workpath", str(work / "pyi"),
            "--specpath", str(work), "--paths", str(ROOT / "src"),
            "--collect-submodules", "raceoverlay",
+           "--collect-submodules", "racecore",
            "--add-data", f"{src / 'fonts'}:raceoverlay/fonts",
            "--add-data", f"{src / 'icon.svg'}:raceoverlay",
            "--hidden-import", "mpv",

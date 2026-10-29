@@ -32,7 +32,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from . import gauges, media, telemetry
+from racecore import telemetry
+
+from . import gauges, media
 from .render import OverlayContext, draw_overlay
 
 SEGMENT_SECONDS = 20.0

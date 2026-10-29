@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import gauges
-from .laps import CornerModel, LapModel
-from .telemetry import Telemetry
+from racecore.laps import CornerModel, LapModel
+from racecore.telemetry import Telemetry
 
 TRAIL_SECONDS = 1.0
 TRAIL_POINTS = 10

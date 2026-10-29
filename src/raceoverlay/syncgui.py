@@ -24,7 +24,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import gauges, telemetry  # noqa: E402  (Qt imported in main/below)
+from racecore import telemetry  # noqa: E402
+
+from . import gauges  # noqa: E402  (Qt imported in main/below)
 
 KMH_PER_MPH = 1.60934
 TRACE_WINDOW = 60.0  # seconds of speed trace shown around the playhead
