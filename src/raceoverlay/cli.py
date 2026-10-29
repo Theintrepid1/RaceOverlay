@@ -9,7 +9,9 @@ import os
 import sys
 import tempfile
 
-from . import demo, engine, gauges, media, telemetry
+from racecore import telemetry
+
+from . import demo, engine, gauges, media
 
 
 def _parse_overrides(pairs: list[str]) -> dict[str, str]:
