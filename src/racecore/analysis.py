@@ -113,6 +113,7 @@ class CornerResult:
     brake_d_ref: float | None
     best_lost: float          # the fastest any lap went through here vs reference
     grip: "gripmod.TurnGrip | None" = None
+    best_key: tuple | None = None   # the lap that was fastest here
 
 
 class Analysis:
@@ -426,7 +427,8 @@ class Analysis:
             lost = float(dl[i1] - dl[i0])
             near = slice(max(i0, int(np.searchsorted(self.grid, c.apex_d - 120))),
                          min(i1 + 1, int(np.searchsorted(self.grid, c.apex_d + 120)) + 1))
-            best = min(float((self.delta(x)[i1] - self.delta(x)[i0])) for x in timed)
+            best, best_key = min(((float(self.delta(x)[i1] - self.delta(x)[i0]), x.key)
+                                  for x in timed), key=lambda t: t[0])
             g = None
             if self.envelope is not None and ld.lat_g is not None and self.ref.lat_g is not None:
                 u, pk, soft = self._turn_grip(ld, i0, i1)
@@ -434,7 +436,7 @@ class Analysis:
                 g = gripmod.TurnGrip(u, ur, pk, pkr, soft, softr)
             out.append(CornerResult(c, lost, float(v[near].min()), float(vr[near].min()),
                                     self._brake_point(ld, c), self._brake_point(self.ref, c),
-                                    best, g))
+                                    best, g, best_key))
         return out
 
 
