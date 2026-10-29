@@ -116,7 +116,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         rsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         tables = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.lap_tree = QtWidgets.QTreeWidget()
-        self.lap_tree.setHeaderLabels(["Lap", "Time", "Gap", "S1", "S2", "S3"])
+        self.lap_tree.setHeaderLabels(["Lap", "Gap", "S1", "S2", "S3"])
         self.lap_tree.setRootIsDecorated(True)
         self.lap_tree.setUniformRowHeights(True)
         self.lap_tree.header().setStretchLastSection(False)
@@ -183,6 +183,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
 
     def _spd(self, kmh):
         return np.asarray(kmh) * (0.621371 if self.use_mph else 1.0)
+
+    def _name(self, ld) -> str:
+        """'Lap 5 – 2:19.806' (with the session name when there are several)."""
+        return f"{ld.label(self.a.sessions)}  –  {fmt_lap(ld.time)}"
 
     def _lap(self, key) -> analysis.LapData | None:
         return next((ld for ld in self.a.laps if ld.key == key), None)
@@ -260,7 +264,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         bs = a.best_sectors()
         parts = " + ".join(f"S{k + 1} lap {ld.lap.n}" for k, (_, ld) in enumerate(bs))
-        txt = (f"<b>Reference:</b> {a.ref.label(a.sessions)} {fmt_lap(a.ref.time)}"
+        txt = (f"<b>Reference:</b> {self._name(a.ref)}"
                f" &nbsp; <b>Theoretical best:</b> {fmt_lap(a.theoretical_best())}"
                f" <small>({parts})</small>")
         self.summary.setText(txt)
@@ -283,30 +287,30 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             top.setFirstColumnSpanned(True)
             tree.addTopLevelItem(top)
             for ld in [x for x in a.laps if x.session == si]:
-                row = [f"Lap {ld.lap.n}", fmt_lap(ld.time),
+                row = [f"Lap {ld.lap.n}  –  {fmt_lap(ld.time)}",
                        "" if ld is a.ref else (fmt_gap(ld.time - best) if ld.timed else "slow")]
                 row += [f"{t:.2f}" for t in ld.sectors]
                 it = QtWidgets.QTreeWidgetItem(row)
                 it.setData(0, QtCore.Qt.UserRole, ("lap", ld.key))
                 it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
                 it.setCheckState(0, QtCore.Qt.Unchecked)  # set in _restyle_laps
-                for c in range(1, 6):
+                for c in range(1, 5):
                     it.setTextAlignment(c, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 if ld is a.ref:
                     f = it.font(0)
                     f.setBold(True)
-                    for c in range(6):
+                    for c in range(5):
                         it.setFont(c, f)
-                    it.setText(2, "ref")
+                    it.setText(1, "ref")
                 for k, t in enumerate(ld.sectors):
                     if ld.timed and abs(t - bsec[k]) < 1e-9:
-                        it.setForeground(3 + k, purple)
+                        it.setForeground(2 + k, purple)
                 if not ld.timed:
-                    for c in range(6):
+                    for c in range(5):
                         it.setForeground(c, QtGui.QColor(NEUTRAL))
                 top.addChild(it)
             top.setExpanded(True)
-        for c in range(6):
+        for c in range(5):
             tree.resizeColumnToContents(c)
         tree.blockSignals(False)
         self._restyle_laps()
@@ -407,7 +411,12 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                     band.setZValue(-10)
                     p.addItem(band, ignoreBounds=True)
         rp = pg.mkPen(REF_COLOR, width=1.6)
-        self.p_delta.addLine(y=0, pen=rp)
+        if self.p_delta.legend is None:
+            self.p_delta.addLegend(offset=(8, 4), labelTextColor="#d8d7d0",
+                                   brush=pg.mkBrush(20, 20, 20, 200))
+        self.p_delta.legend.clear()
+        self.p_delta.plot([0, float(x[-1])], [0, 0], pen=rp,
+                          name=f"Ref: {self._name(a.ref)}")
         self.p_speed.plot(x, self._spd(a.channel_on_grid(a.ref, "speed")), pen=rp)
         g = a.channel_on_grid(a.ref, "lon_g")
         if g is not None:
@@ -417,7 +426,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             if ld is None:
                 continue
             pen = pg.mkPen(SERIES[i], width=1.6 if key == self.focus else 1.1)
-            self.p_delta.plot(x, a.delta(ld), pen=pen)
+            self.p_delta.plot(x, a.delta(ld), pen=pen, name=self._name(ld))
             self.p_speed.plot(x, self._spd(a.channel_on_grid(ld, "speed")), pen=pen)
             g = a.channel_on_grid(ld, "lon_g")
             if g is not None:
@@ -507,7 +516,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         res = sorted(a.corner_results(ld), key=lambda r: -r.lost)
         total = ld.time - a.ref.time
         self.corner_lbl.setText(
-            f"<b>{ld.label(a.sessions)}</b> vs reference: {fmt_gap(total)} s. "
+            f"<b>{self._name(ld)}</b> vs reference: {fmt_gap(total)} s. "
             "Corners are found on the reference lap (C1 = first after the "
             "line); each owns the track up to the next one.")
         t.setRowCount(len(res))
@@ -572,7 +581,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         spd = self._spd(np.interp(d, a.grid, a.channel_on_grid(ld, "speed")))
         dl = float(np.interp(d, a.grid, a.delta(ld))) if ld is not a.ref else 0.0
         self.video_lbl.setText(
-            f"{ld.label(a.sessions)} · {fmt_lap(t_into)} · {spd:.0f} "
+            f"{self._name(ld)} · at {fmt_lap(t_into)} · {spd:.0f} "
             f"{'mph' if self.use_mph else 'km/h'} · {fmt_gap(dl)} s vs ref")
         if seek:
             self._seek_lap(ld, t_into)
@@ -645,8 +654,13 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         self.btn_play.setText("Play" if paused else "Pause")
         v = self._session_video(ld)
-        if paused or vt is None or not v:
+        if vt is None or not v:
             return
+        # follow the video while it plays, plus once more after it pauses or
+        # steps, so the cursor ends on the frame that's showing
+        if paused and abs(float(vt) - self._vt) < 1e-3:
+            return
+        self._vt = float(vt)
         t_into = float(vt) + v[1] - ld.lap.start
         if 0 <= t_into <= ld.time:
             self.set_cursor(self.a.dist_at(ld, t_into))
