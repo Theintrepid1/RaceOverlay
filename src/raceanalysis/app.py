@@ -33,6 +33,7 @@ from .common import FT, INK_DIM, MAX_COMPARE, MPH, REF_COLOR, SERIES, fmt_lap, s
 from .pages.corners import CornersPage
 from .pages.laps import LapsPage
 from .pages.overview import OverviewPage
+from .pages.track import TrackPage
 from .videopanel import VideoPanel
 
 
@@ -98,7 +99,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         m.addSeparator()
         m.addAction("Close", self.close, "Ctrl+W")
         m = mb.addMenu("&Track")
-        self.act_turns = m.addAction("Track turns…", self.edit_turns)
+        self.act_turns = m.addAction("Track turns…", self.edit_turns, "Ctrl+T")
         m = mb.addMenu("&View")
         self.act_video = m.addAction("Show video on this tab", self._toggle_video, "V")
         self.act_video.setCheckable(True)
@@ -161,7 +162,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
-        self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self)]
+        self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self), TrackPage(self)]
         for p in self.pages:
             self.tabs.addTab(p, p.title.replace("&", "&&"))
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -685,7 +686,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                                               f"{Path(path).name}\n\n{e}")
             return str(e)
         if len(self.a.sessions) == 1 and self.a.origin:
-            self.a.use_profile(tracks.find(*self.a.origin))
+            self.a.use_profile(self._track_for(*self.a.origin))
         if self.focus is None or self.lap(self.focus) is None:
             self._default_selection()
         if refresh:
@@ -719,6 +720,19 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             last = sorted(timed, key=lambda ld: ld.time)[1]
         self.focus = last.key
         self.compare = [last.key] if last is not self.a.ref else []
+
+    def _track_for(self, lat, lon):
+        """The saved track for this start line; with several layouts there,
+        the one used last."""
+        near = [p for p in tracks.load_all()
+                if float(np.hypot(*tracks.to_xy(lat, lon, p.lat0, p.lon0)[0]))
+                <= tracks.SAME_TRACK_M]
+        last = settings().value("analysis/track_last", "")
+        return next((p for p in near if p.path == last), None) or tracks.find(lat, lon)
+
+    def remember_track(self, p):
+        if p is not None and p.path:
+            settings().setValue("analysis/track_last", p.path)
 
     def import_card(self):
         from .importer import ImportDialog
@@ -768,13 +782,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.refresh()
 
     def edit_turns(self):
-        if self.a.ref is None:
-            return
-        from .turns import TurnsDialog
-        dlg = TurnsDialog(self, self.a, self.a.profile)
-        if dlg.exec():
-            self.a.use_profile(dlg.profile)
-            self.refresh()
+        """Track → Track turns: open the Track tab."""
+        self._show_page(self._page(TrackPage))
 
     # ------------------------------------------------------- find video ---
     def find_video(self):
@@ -831,6 +840,16 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.status(f"Video synced to {s.name} (offset {res.offset:+.2f} s).")
 
     def closeEvent(self, ev):
+        tp = self._page(TrackPage)
+        if tp.editor.dirty:
+            r = QtWidgets.QMessageBox.question(
+                self, "Unsaved track changes", "Save the changes to this track's turns?",
+                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+                | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Save)
+            if r == QtWidgets.QMessageBox.Cancel or (
+                    r == QtWidgets.QMessageBox.Save and not tp.editor.save()):
+                ev.ignore()
+                return
         self._closing = True
         self.timer.stop()
         for w in list(self._popouts.values()):
