@@ -68,6 +68,7 @@ class LapsPage(QtWidgets.QWidget):
         self.legend.setTextFormat(QtCore.Qt.RichText)
         self.legend.setWordWrap(True)
         self.legend.setStyleSheet("background:#000; padding:4px 8px;")
+        self.legend.setMinimumWidth(100)
         ll.addWidget(self.legend)
         ll.addWidget(self.traces, 1)
         split.addWidget(left)
