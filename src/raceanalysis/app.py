@@ -13,13 +13,14 @@ import argparse
 import locale
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from racecore import analysis, telemetry
+from racecore import analysis, gosync, ingest, telemetry
 from raceoverlay import media
 from raceoverlay.syncgui import (MpvNativeWidget, MpvWidget, _btn, _note,
                                  pick_file, preview_mode, settings)
@@ -31,6 +32,14 @@ GAIN, LOSS, NEUTRAL = "#199e70", "#e66767", "#6b6a64"
 CURSOR = "#f2f1ec"
 MAX_COMPARE = len(SERIES)
 FT = 3.28084
+
+
+def session_name(path: str) -> str:
+    """'Session 2 · Sep 27' for APEX Pro exports, else the file name."""
+    lg = ingest.log_info(path) if Path(path).exists() else None
+    if lg and lg.session and ingest.APEX_DATE_RE.search(Path(path).name):
+        return f"Session {lg.session} · {lg.date:%b %d}"
+    return Path(path).stem
 
 
 def fmt_lap(s: float) -> str:
@@ -56,10 +65,12 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._vt = 0.0
         self._duration = 0.0
         self._following = False
+        self._sync_job: dict | None = None
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1680, int(avail.width() * 0.95)),
                     min(1000, int(avail.height() * 0.92)))
         self._build_ui()
+        self._summary()  # welcome text until a session is added
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(50)
@@ -104,14 +115,23 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         rl = QtWidgets.QVBoxLayout(right)
         rl.setContentsMargins(6, 0, 0, 0)
         tools = QtWidgets.QHBoxLayout()
-        tools.addWidget(_btn("Add session…", self._add_session_dialog,
-                             "Add another data file from the same track"))
+        tools.addWidget(_btn("Import from GoPro card…", self._import_card,
+                             "Copy new recordings off the card into a folder per "
+                             "track day, match each to its data file and sync it"))
+        tools.addWidget(_btn("Open track day…", self._open_day,
+                             "Load every synced session in a track-day folder"))
+        tools.addWidget(_btn("Add data file…", self._add_session_dialog,
+                             "Add a data file from the same track"))
+        tools.addWidget(_btn("Find video…", self._find_video,
+                             "Pick the GoPro video for the selected session and "
+                             "sync it from the camera's sensors"))
         tools.addWidget(_btn("Remove session", self._remove_session))
         tools.addWidget(_btn("Use as reference", self._set_reference,
                              "Compare everything against the selected lap"))
-        self.summary = _note("")
-        tools.addWidget(self.summary, 1)
+        tools.addStretch(1)
         rl.addLayout(tools)
+        self.summary = _note("")
+        rl.addWidget(self.summary)
 
         rsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         tables = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -192,22 +212,134 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         return next((ld for ld in self.a.laps if ld.key == key), None)
 
     # ========================================================== sessions ===
-    def add_session(self, path: str, tel=None, video=None) -> bool:
+    def add_session(self, path: str, tel=None, video=None, quiet=False,
+                    refresh=True) -> str | None:
+        """Add a data file. Returns None on success, else why it wasn't added
+        (also shown in a message unless quiet)."""
         try:
+            if any(Path(s.path).resolve() == Path(path).resolve() for s in self.a.sessions):
+                return "already open"
             tel = tel if tel is not None else telemetry.load(path)
             if video is None:
                 s = settings()
                 video = analysis.find_video(path, [
                     s.value("import/library", ""), str(Path(path).parent)])
-            self.a.add(tel, path, video=video)
+            self.a.add(tel, path, name=session_name(path), video=video)
         except Exception as e:  # noqa: BLE001 - shown to the user
-            QtWidgets.QMessageBox.warning(self, "Can't add this file",
-                                          f"{Path(path).name}\n\n{e}")
-            return False
+            if not quiet:
+                QtWidgets.QMessageBox.warning(self, "Can't add this file",
+                                              f"{Path(path).name}\n\n{e}")
+            return str(e)
         if self.focus is None or self._lap(self.focus) is None:
             self._default_selection()
+        if refresh:
+            self._refresh()
+        return None
+
+    def _add_many(self, items: list[tuple[str, list[str] | None, float | None]]):
+        """Add (csv, video files, offset) sessions; one message for problems."""
+        added, problems = 0, []
+        for csv, parts, off in items:
+            why = self.add_session(csv, video=(parts, off) if parts else None,
+                                   quiet=True, refresh=False)
+            if why is None:
+                added += 1
+            elif why != "already open":
+                problems.append(f"{Path(csv).name}: {why}")
+        self._video_session = None
         self._refresh()
-        return True
+        if problems:
+            QtWidgets.QMessageBox.warning(self, "Some files weren't added",
+                                          "\n".join(problems))
+        return added
+
+    def _import_card(self):
+        from .importer import ImportDialog
+        dlg = ImportDialog(self)
+        if dlg.exec() and dlg.result:
+            n = self._add_many(dlg.result)
+            self.summary.setText(self.summary.text() +
+                                 f" &nbsp; <i>Imported: {n} session(s) added.</i>")
+
+    def _open_day(self):
+        from .importer import _pick_dir
+        s = settings()
+        lib = s.value("import/library", "")
+        start = s.value("analysis/day", "") or lib
+        d = _pick_dir(self, "Track-day folder", start)
+        if not d:
+            return
+        s.setValue("analysis/day", d)
+        found = ingest.synced_sessions(d)
+        if not found:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing synced here",
+                "No synced videos in this folder. Import from the card first, or "
+                "use Add data file… and Find video….")
+            return
+        self._add_many(found)
+
+    # ------------------------------------------------------- find video ---
+    def _selected_session(self) -> int | None:
+        it = self.lap_tree.currentItem()
+        if it is None:
+            return None
+        data = it.data(0, QtCore.Qt.UserRole)
+        return data[1] if data[0] == "session" else data[1][0]
+
+    def _find_video(self):
+        si = self._selected_session()
+        if si is None or self._sync_job is not None:
+            return
+        s = self.a.sessions[si]
+        p = pick_file(self, f"GoPro video for {s.name}", "video",
+                      "Video (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
+        if not p:
+            return
+        parts = media.find_chapters(p)
+        tel = s.tel
+        job = {"si": si, "parts": parts, "done": False, "res": None, "err": None}
+        self._sync_job = job
+        self.summary.setText(f"Syncing {Path(p).name} to {s.name} from the camera's "
+                             "sensors…")
+
+        def work():
+            try:
+                info = media.probe(parts)
+                res, *_ = gosync.sync_parts([(x.path, x.start) for x in info.parts], tel)
+                job["res"] = res
+            except gosync.NoCameraData:
+                job["err"] = ("This video has no GoPro sensor track (merged or "
+                              "re-encoded files lose it). Pick the original "
+                              "GH01xxxx file.")
+            except Exception as e:  # noqa: BLE001
+                job["err"] = str(e)
+            job["done"] = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_find_video(self):
+        job, self._sync_job = self._sync_job, None
+        if job["err"]:
+            QtWidgets.QMessageBox.warning(self, "Couldn't sync", job["err"])
+            self._summary()
+            return
+        res = job["res"]
+        if not res.confident:
+            r = QtWidgets.QMessageBox.question(
+                self, "Weak match",
+                f"The best match is weak ({res.score:.0%}, next best "
+                f"{res.runner_up:.0%}). The video may be from another session.\n\n"
+                f"Use it anyway (offset {res.offset:+.2f} s)?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if r != QtWidgets.QMessageBox.Yes:
+                self._summary()
+                return
+        s = self.a.sessions[job["si"]]
+        s.video = (job["parts"], res.offset)
+        ingest.save_pairing(job["parts"], s.path, res.offset)
+        self._video_session = None
+        self._refresh()
 
     def _add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",
@@ -260,7 +392,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
     def _summary(self):
         a = self.a
         if a.ref is None:
-            self.summary.setText("Add a data file to start.")
+            self.summary.setText(
+                "<b>At the track:</b> Import from GoPro card… copies the new "
+                "recordings and matches them to your data files. "
+                "<b>Later:</b> Open track day… loads a day you imported before.")
             return
         bs = a.best_sectors()
         parts = " + ".join(f"S{k + 1} lap {ld.lap.n}" for k, (_, ld) in enumerate(bs))
@@ -644,6 +779,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
 
     def _tick(self):
         """While the video plays, move the cursor with it."""
+        if self._sync_job is not None and self._sync_job["done"]:
+            self._finish_find_video()
         ld = self._lap(self.focus) if self.focus else None
         if ld is None:
             return
@@ -712,8 +849,6 @@ def main(argv: list[str] | None = None) -> int:
     for p in args.csv:
         if os.path.exists(p):
             win.add_session(p)
-    if not args.csv:
-        QtCore.QTimer.singleShot(200, win._add_session_dialog)
     return app.exec()
 
 
