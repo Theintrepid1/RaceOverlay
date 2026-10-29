@@ -51,14 +51,18 @@ class CornersPage(QtWidgets.QWidget):
         self.loop.toggled.connect(self._loop_toggled)
         row.addWidget(self.loop)
         row.addSpacing(16)
-        self.felt = QtWidgets.QCheckBox("G as felt in the car")
-        self.felt.setToolTip("Off: the dot moves the way the car accelerates (braking down, "
-                             "a right turn to the right).\nOn: the dot moves the way you're "
-                             "pushed in the seat (braking up, a right turn to the left), "
-                             "like a ball on the dash.")
-        self.felt.setChecked(settings().value("analysis/gg_felt", False, type=bool))
-        self.felt.toggled.connect(self._felt_toggled)
-        row.addWidget(self.felt)
+        st = settings()
+        old = st.value("analysis/gg_felt", False, type=bool)   # earlier single option
+        self.flip_lon = QtWidgets.QCheckBox("Flip accel/brake")
+        self.flip_lon.setToolTip("Braking at the top and accelerating at the bottom, the way "
+                                 "you're pushed in the seat")
+        self.flip_lon.setChecked(st.value("analysis/gg_flip_lon", old, type=bool))
+        self.flip_lat = QtWidgets.QCheckBox("Flip left/right")
+        self.flip_lat.setToolTip("A right turn on the left side, the way you're pushed in the seat")
+        self.flip_lat.setChecked(st.value("analysis/gg_flip_lat", old, type=bool))
+        for chk in (self.flip_lon, self.flip_lat):
+            chk.toggled.connect(self._flip_toggled)
+            row.addWidget(chk)
         row.addStretch(1)
         self.btn_all = QtWidgets.QPushButton("Whole lap")
         self.btn_all.setToolTip("Clear the picked turns")
@@ -104,9 +108,9 @@ class CornersPage(QtWidgets.QWidget):
         ld = w.focus_lap()
         if self.marker is None or ld is None or ld.lat_g is None or ld.lon_g is None:
             return
-        k = self._k()
-        self.marker.setData([k * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
-                            [k * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
+        kx, ky = self._k()
+        self.marker.setData([kx * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
+                            [ky * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
 
     def ref_cursor(self, rd: float | None):
         """Where the reference video is (None: no reference video showing)."""
@@ -117,16 +121,19 @@ class CornersPage(QtWidgets.QWidget):
         if rd is None or ref is None or ref.lat_g is None or ref.lon_g is None:
             self.ref_marker.setData([], [])
             return
-        k = self._k()
-        self.ref_marker.setData([k * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
-                                [k * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
+        kx, ky = self._k()
+        self.ref_marker.setData([kx * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
+                                [ky * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
 
     def _k(self) -> float:
-        """+1: car's acceleration; -1: as felt in the seat (both axes flip)."""
-        return -1.0 if self.felt.isChecked() else 1.0
+        """(x, y) signs: +1 plots the car's acceleration, -1 flips that axis
+        to how you're pushed in the seat."""
+        return (-1.0 if self.flip_lat.isChecked() else 1.0,
+                -1.0 if self.flip_lon.isChecked() else 1.0)
 
-    def _felt_toggled(self, on: bool):
-        settings().setValue("analysis/gg_felt", on)
+    def _flip_toggled(self, _on):
+        settings().setValue("analysis/gg_flip_lon", self.flip_lon.isChecked())
+        settings().setValue("analysis/gg_flip_lat", self.flip_lat.isChecked())
         self._draw_gg()
 
     def show_turn(self, n: int):
@@ -311,27 +318,25 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.addItem(lbl)
         self.gg.plot([-1.6, 1.6], [0, 0], pen=grid_pen)
         self.gg.plot([0, 0], [-1.6, 1.6], pen=grid_pen)
-        k = self._k()
-        felt = k < 0
-        self.gg.setLabel("bottom", "Pushed sideways (g)" if felt else "Lateral g (right turn +)")
-        self.gg.setLabel("left", "Pushed forward + / back – (g)" if felt
-                         else "Brake – / accel + (g)")
-        for txt, x, y, anc in (("Braking", 0, -1.55 * k, (0.5, 0 if not felt else 1)),
-                               ("Accel", 0, 1.55 * k, (0.5, 1 if not felt else 0)),
-                               ("Left turn", -1.55 * k, 0, (0 if not felt else 1, 1)),
-                               ("Right turn", 1.55 * k, 0, (1 if not felt else 0, 1))):
+        kx, ky = self._k()
+        self.gg.setLabel("bottom", "Lateral g")
+        self.gg.setLabel("left", "Longitudinal g")
+        for txt, x, y, anc in (("Braking", 0, -1.55 * ky, (0.5, 0 if ky > 0 else 1)),
+                               ("Accel", 0, 1.55 * ky, (0.5, 1 if ky > 0 else 0)),
+                               ("Left turn", -1.55 * kx, 0, (0 if kx > 0 else 1, 1)),
+                               ("Right turn", 1.55 * kx, 0, (1 if kx > 0 else 0, 1))):
             t = pg.TextItem(txt, color="#8a8983", anchor=anc)
             t.setPos(x, y)
             self.gg.addItem(t)
         if a.envelope is not None:
             o = a.envelope.outline()
-            self.gg.plot(k * o[:, 0], k * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
+            self.gg.plot(kx * o[:, 0], ky * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
                                                         style=QtCore.Qt.DashLine))
             # label it on the cornering side, so it isn't taken for a lap
             th = np.deg2rad(20)
             r = float(a.envelope.at(th))
-            lbl = pg.TextItem("your limit", color=LIMIT, anchor=(0 if k > 0 else 1, 0.5))
-            lbl.setPos(k * (r * np.cos(th) + 0.04), k * r * np.sin(th))
+            lbl = pg.TextItem("your limit", color=LIMIT, anchor=(0 if kx > 0 else 1, 0.5))
+            lbl.setPos(kx * (r * np.cos(th) + 0.04), ky * r * np.sin(th))
             self.gg.addItem(lbl)
         ld = w.focus_lap() or a.ref
         cs, span = self._picked()
@@ -343,12 +348,12 @@ class CornersPage(QtWidgets.QWidget):
             fast = lap.v > 30
             if span is None:
                 alpha = 70 if lap is a.ref and ld is not a.ref else 170
-                self.gg.plot(k * lap.lat_g[fast], k * lap.lon_g[fast], pen=None, symbol="o",
+                self.gg.plot(kx * lap.lat_g[fast], ky * lap.lon_g[fast], pen=None, symbol="o",
                              symbolSize=size, symbolPen=None,
                              symbolBrush=pg.mkBrush(q.red(), q.green(), q.blue(), alpha))
             else:
                 inside = fast & (lap.d >= span[0]) & (lap.d <= span[1])
-                self.gg.plot(k * lap.lat_g[inside], k * lap.lon_g[inside],
+                self.gg.plot(kx * lap.lat_g[inside], ky * lap.lon_g[inside],
                              pen=pg.mkPen(col, width=1.2),
                              symbol="o", symbolSize=size + 2, symbolPen=None,
                              symbolBrush=pg.mkBrush(col))
