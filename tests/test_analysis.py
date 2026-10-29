@@ -159,3 +159,22 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_repeated_gps_positions_do_not_spike_the_delta():
+    """APEX Pro logs repeat the previous GPS fix on ~7% of samples. Two
+    identically driven laps must still have a flat delta."""
+    tel = _session([(None, 0), (None, 0)], noise=0.0)
+    lat, lon = tel.channels["gps_lat"].copy(), tel.channels["gps_lon"].copy()
+    rng = np.random.default_rng(5)
+    rep = rng.random(len(lat)) < 0.07
+    rep[0] = False
+    for i in np.flatnonzero(rep):
+        lat[i], lon[i] = lat[i - 1], lon[i - 1]
+    tel.channels["gps_lat"], tel.channels["gps_lon"] = lat, lon
+    a = analysis.Analysis()
+    a.add(tel, "rep.csv")
+    other = next(ld for ld in a.timed_laps() if ld is not a.ref)
+    dl = a.delta(other)
+    assert np.max(np.abs(np.diff(dl))) < 0.02, np.max(np.abs(np.diff(dl)))
+    assert np.max(np.abs(dl)) < 0.1, np.max(np.abs(dl))

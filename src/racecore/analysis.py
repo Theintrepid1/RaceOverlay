@@ -192,10 +192,27 @@ class Analysis:
         self.length = float(self._ref_s[-1])
         self.grid = np.arange(0.0, self.length, STEP_M)
         for ld in self.laps:
-            ld.d = self._project(ld.xy)
+            ld.d = self._distance(ld)
             ld.time_at = self._time_on_grid(ld)
             ld.sectors = self._sectors(ld)
         self._find_corners()
+
+    def _distance(self, ld: LapData) -> np.ndarray:
+        """Distance along the reference for every sample of a lap.
+
+        Loggers often repeat the last GPS fix when an update is missed (about
+        7% of samples in an APEX Pro log). Taken at face value the car would
+        stand still for that sample and the delta would spike, so repeated
+        positions are skipped and filled in by time from their neighbours.
+        """
+        xy = ld.xy
+        fresh = np.ones(len(xy), bool)
+        fresh[1:] = np.any(np.diff(xy, axis=0) != 0, axis=1)
+        d_fresh = self._project(xy[fresh])
+        d = np.interp(ld.t, ld.t[fresh], d_fresh)
+        d = np.maximum.accumulate(d)
+        d[0] = 0.0
+        return d
 
     def _project(self, q: np.ndarray) -> np.ndarray:
         """Distance along the reference path for each point of a lap,
