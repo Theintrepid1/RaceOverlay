@@ -59,7 +59,18 @@ class LapsPage(QtWidgets.QWidget):
         self.dots = []        # (plot, channel key, your dot, reference dot)
         self._ys = {}
         self.traces.scene().sigMouseClicked.connect(self._traces_clicked)
-        split.addWidget(self.traces)
+        # legend as a row above the plots, so it never covers a trace
+        left = QtWidgets.QWidget()
+        ll = QtWidgets.QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+        self.legend = QtWidgets.QLabel("")
+        self.legend.setTextFormat(QtCore.Qt.RichText)
+        self.legend.setWordWrap(True)
+        self.legend.setStyleSheet("background:#000; padding:4px 8px;")
+        ll.addWidget(self.legend)
+        ll.addWidget(self.traces, 1)
+        split.addWidget(left)
 
         side = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.map = pg.PlotWidget()
@@ -163,6 +174,7 @@ class LapsPage(QtWidgets.QWidget):
             p.addItem(rl, ignoreBounds=True)
         w, a = self.win, self.win.a
         if a.ref is None:
+            self.legend.setText("")
             return
         x = w.x(a.grid)
         self.p_speed.setLabel("left", f"Speed ({w.speed_unit()})")
@@ -176,11 +188,8 @@ class LapsPage(QtWidgets.QWidget):
                     band.setZValue(-10)
                     p.addItem(band, ignoreBounds=True)
         rp = pg.mkPen(REF_COLOR, width=1.6)
-        if self.p_delta.legend is None:
-            self.p_delta.addLegend(offset=(8, 4), labelTextColor="#d8d7d0",
-                                   brush=pg.mkBrush(20, 20, 20, 200))
-        self.p_delta.legend.clear()
-        self.p_delta.plot([0, float(x[-1])], [0, 0], pen=rp, name=f"Ref: {w.name(a.ref)}")
+        self.p_delta.plot([0, float(x[-1])], [0, 0], pen=rp)
+        entries = [(REF_COLOR, f"Ref: {w.name(a.ref)}", False)]
         self.p_speed.plot(x, w.spd(a.channel_on_grid(a.ref, "speed")), pen=rp)
         g = a.channel_on_grid(a.ref, "lon_g")
         if g is not None:
@@ -194,7 +203,8 @@ class LapsPage(QtWidgets.QWidget):
             if ld is None:
                 continue
             pen = pg.mkPen(SERIES[i], width=1.8 if key == w.focus else 1.1)
-            self.p_delta.plot(x, a.delta(ld), pen=pen, name=w.name(ld))
+            self.p_delta.plot(x, a.delta(ld), pen=pen)
+            entries.append((SERIES[i], w.name(ld), key == w.focus))
             self.p_speed.plot(x, w.spd(a.channel_on_grid(ld, "speed")), pen=pen)
             g = a.channel_on_grid(ld, "lon_g")
             if g is not None:
@@ -202,6 +212,12 @@ class LapsPage(QtWidgets.QWidget):
             u = a.grip_on_grid(ld)
             if u is not None:
                 self.p_grip.plot(x, u * 100, pen=pen, connect="finite")
+        parts = []
+        for col, txt, focus in entries:
+            name = f"<b>{txt}</b>" if focus else txt
+            parts.append(f"<span style='color:{col}; font-size:16px;'>━━</span>&nbsp;"
+                         f"<span style='color:#d8d7d0;'>{name}</span>")
+        self.legend.setText("&nbsp;&nbsp;&nbsp;&nbsp;".join(parts))
         self.p_grip.setYRange(0, 115, padding=0)
         vr = self.p_speed.viewRange()[1]
         for c in a.corners:
