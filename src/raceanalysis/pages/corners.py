@@ -50,7 +50,6 @@ class CornersPage(QtWidgets.QWidget):
         self.loop.setChecked(settings().value("analysis/corner_loop", True, type=bool))
         self.loop.toggled.connect(self._loop_toggled)
         row.addWidget(self.loop)
-        row.addSpacing(16)
         st = settings()
         old = st.value("analysis/gg_felt", False, type=bool)   # earlier single option
         self.flip_lon = QtWidgets.QCheckBox("Flip accel/brake")
@@ -62,7 +61,6 @@ class CornersPage(QtWidgets.QWidget):
         self.flip_lat.setChecked(st.value("analysis/gg_flip_lat", old, type=bool))
         for chk in (self.flip_lon, self.flip_lat):
             chk.toggled.connect(self._flip_toggled)
-            row.addWidget(chk)
         row.addStretch(1)
         self.btn_all = QtWidgets.QPushButton("Whole lap")
         self.btn_all.setToolTip("Clear the picked turns")
@@ -84,7 +82,18 @@ class CornersPage(QtWidgets.QWidget):
         self.gg.setMenuEnabled(False)
         for ax in ("left", "bottom"):
             self.gg.getAxis(ax).enableAutoSIPrefix(False)
-        split.addWidget(self.gg)
+        # g-g with its own options row above it, so they don't widen the table side
+        right = QtWidgets.QWidget()
+        rl = QtWidgets.QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(2)
+        opts = QtWidgets.QHBoxLayout()
+        opts.addStretch(1)
+        opts.addWidget(self.flip_lon)
+        opts.addWidget(self.flip_lat)
+        rl.addLayout(opts)
+        rl.addWidget(self.gg, 1)
+        split.addWidget(right)
         split.setSizes([560, 460])
         lay.addWidget(split)
         self.marker = None
@@ -333,9 +342,10 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.plot(kx * o[:, 0], ky * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
                                                         style=QtCore.Qt.DashLine))
             # label it on the cornering side, so it isn't taken for a lap
-            th = np.deg2rad(20)
+            th = np.deg2rad(310)   # trail-braking side, clear of the axis labels
             r = float(a.envelope.at(th))
-            lbl = pg.TextItem("your limit", color=LIMIT, anchor=(0 if kx > 0 else 1, 0.5))
+            lbl = pg.TextItem("your limit", color=LIMIT,
+                              anchor=(0 if kx > 0 else 1, 0 if ky > 0 else 1))
             lbl.setPos(kx * (r * np.cos(th) + 0.04), ky * r * np.sin(th))
             self.gg.addItem(lbl)
         ld = w.focus_lap() or a.ref
