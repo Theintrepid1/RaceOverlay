@@ -20,7 +20,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from racecore import analysis, gosync, ingest, telemetry
+from racecore import analysis, gosync, ingest, telemetry, tracks
 from raceoverlay import media
 from raceoverlay.syncgui import (MpvNativeWidget, MpvWidget, _btn, _note,
                                  pick_file, preview_mode, settings)
@@ -128,6 +128,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         tools.addWidget(_btn("Remove session", self._remove_session))
         tools.addWidget(_btn("Use as reference", self._set_reference,
                              "Compare everything against the selected lap"))
+        tools.addWidget(_btn("Track turns…", self._edit_turns,
+                             "Name the turns like the official track map"))
         tools.addStretch(1)
         rl.addLayout(tools)
         self.summary = _note("")
@@ -230,6 +232,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(self, "Can't add this file",
                                               f"{Path(path).name}\n\n{e}")
             return str(e)
+        if len(self.a.sessions) == 1 and self.a.origin:
+            self.a.use_profile(tracks.find(*self.a.origin))
         if self.focus is None or self._lap(self.focus) is None:
             self._default_selection()
         if refresh:
@@ -278,6 +282,15 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 "use Add data file… and Find video….")
             return
         self._add_many(found)
+
+    def _edit_turns(self):
+        if self.a.ref is None:
+            return
+        from .turns import TurnsDialog
+        dlg = TurnsDialog(self, self.a, self.a.profile)
+        if dlg.exec():
+            self.a.use_profile(dlg.profile)
+            self._refresh()
 
     # ------------------------------------------------------- find video ---
     def _selected_session(self) -> int | None:
@@ -568,7 +581,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 self.p_long.plot(x, g, pen=pen)
         vr = self.p_speed.viewRange()[1]
         for c in a.corners:
-            t = pg.TextItem(f"C{c.n}", color="#d8d7d0", anchor=(0.5, 0))
+            t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 0))
             t.setPos(float(self._x(c.apex_d)), vr[1])
             self.p_speed.addItem(t, ignoreBounds=True)
         self.p_delta.setXRange(0, float(x[-1]), padding=0.01)
@@ -609,7 +622,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         for c in a.corners:
             px = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 0]))
             py = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 1]))
-            t = pg.TextItem(f"C{c.n}", color="#d8d7d0", anchor=(0.5, 1.2))
+            t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 1.2))
             t.setPos(px, py)
             self.map.addItem(t)
         sx, sy = ref.xy[0]
@@ -652,12 +665,15 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         total = ld.time - a.ref.time
         self.corner_lbl.setText(
             f"<b>{self._name(ld)}</b> vs reference: {fmt_gap(total)} s. "
-            "Corners are found on the reference lap (C1 = first after the "
-            "line); each owns the track up to the next one.")
+            + (f"Turns from the {self.a.profile.name} map; "
+               if self.a.profile is not None and self.a.profile.turns else
+               "Corners found from speed (C1 = first after the line; Track turns… "
+               "names them like the track map); ")
+            + "each owns the track up to the next one.")
         t.setRowCount(len(res))
         for r, cr in enumerate(res):
             c = cr.corner
-            lr = f"C{c.n}" + (f" ({c.direction})" if c.direction else "")
+            lr = c.name + (f" ({c.direction})" if c.direction else "")
             if cr.brake_d is not None and cr.brake_d_ref is not None:
                 diff = self._x(cr.brake_d - cr.brake_d_ref)
                 brake = (f"{abs(diff):.0f} later" if diff > 0 else

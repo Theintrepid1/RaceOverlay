@@ -96,6 +96,10 @@ class Corner:
     start_d: float            # the stretch of track this corner owns
     end_d: float
     direction: str | None     # "L"/"R"
+    name: str = ""            # "T4" from a track profile, else "C4"
+
+    def __post_init__(self):
+        self.name = self.name or f"C{self.n}"
 
 
 @dataclass
@@ -120,6 +124,17 @@ class Analysis:
         self._origin: tuple[float, float] | None = None
         self._ref_path: np.ndarray | None = None
         self._ref_s: np.ndarray | None = None
+        self.profile = None   # racecore.tracks.TrackProfile with named turns
+
+    def use_profile(self, profile):
+        """Take corners from a track profile's turns (None = detect them)."""
+        self.profile = profile
+        if self.ref is not None:
+            self._find_corners()
+
+    @property
+    def origin(self) -> tuple[float, float] | None:
+        return self._origin
 
     # ------------------------------------------------------------ sessions
     def add(self, tel: Telemetry, path: str = "", name: str = "",
@@ -285,6 +300,9 @@ class Analysis:
 
     # ------------------------------------------------------------ corners
     def _find_corners(self):
+        if self.profile is not None and self.profile.turns:
+            self._corners_from_profile()
+            return
         ref = self.ref
         s = self.sessions[ref.session]
         cm = CornerModel(s.tel, s.laps)
@@ -304,6 +322,38 @@ class Analysis:
             start = 0.0 if n == 1 else (prev + ad) / 2
             end = self.length if n == len(apexes) else (ad + nxt) / 2
             self.corners.append(Corner(n, ad, start, end, gdir))
+
+    def _path_distance(self, pt) -> float:
+        """Distance along the reference path of the point on it nearest pt."""
+        P, S = self._ref_path, self._ref_s
+        a, ab = P[:-1], np.diff(P, axis=0)
+        L2 = np.maximum((ab * ab).sum(1), 1e-9)
+        u = np.clip(((pt - a) * ab).sum(1) / L2, 0.0, 1.0)
+        proj = a + ab * u[:, None]
+        j = int(np.argmin(((proj - pt) ** 2).sum(1)))
+        return float(S[j] + u[j] * (S[j + 1] - S[j]))
+
+    def _corners_from_profile(self):
+        p = self.profile
+        xy = p.turns_xy(*self._origin)
+        lat = self.channel_on_grid(self.ref, "lat_g")
+        found = []
+        for t, pt in zip(p.turns, xy):
+            d = self._path_distance(pt)
+            gdir = None
+            if lat is not None:
+                near = np.abs(self.grid - d) <= 25.0
+                g = float(lat[near].mean()) if near.any() else 0.0
+                gdir = "R" if g > 0.15 else ("L" if g < -0.15 else None)
+            found.append((d, t.name, gdir))
+        found.sort()
+        self.corners = []
+        for n, (ad, name, gdir) in enumerate(found, 1):
+            prev = found[n - 2][0] if n > 1 else 0.0
+            nxt = found[n][0] if n < len(found) else self.length
+            start = 0.0 if n == 1 else (prev + ad) / 2
+            end = self.length if n == len(found) else (ad + nxt) / 2
+            self.corners.append(Corner(n, ad, start, end, gdir, name))
 
     def _brake_point(self, ld: LapData, c: Corner) -> float | None:
         if ld.lon_g is None:
