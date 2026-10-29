@@ -300,3 +300,52 @@ def pair(clip: Clip, parts: list[tuple[str, float]], logs: list[Log],
         return Pairing(clip, None, res.offset, res.score, False, tried,
                        note="no confident match")
     return Pairing(clip, lg, res.offset, res.score, True, tried)
+
+
+# --------------------------------------------------------------- sidecars ---
+# Race Overlay keeps each video's sync in <first file>.sync.json. Writing the
+# pairing there means Race Overlay opens imported videos already synced.
+
+def sidecar_path(parts: list[str]) -> Path:
+    p = Path(parts[0])
+    return p.with_name(p.name + ".sync.json")
+
+
+def save_pairing(parts: list[str], csv: str, offset: float) -> Path | None:
+    """Record that `parts` (one recording) is synced to `csv` at `offset`
+    (logger time = video time + offset). Other settings already in the file
+    (gauge layout, style...) are kept."""
+    sc = sidecar_path(parts)
+    data = {}
+    if sc.exists():
+        try:
+            data = json.loads(sc.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    data.update({"parts": [str(Path(p).resolve()) for p in parts],
+                 "csv": str(Path(csv).resolve()), "offset": round(float(offset), 4),
+                 "synced": True})
+    try:
+        sc.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return sc
+
+
+def synced_sessions(folder: str) -> list[tuple[str, list[str], float]]:
+    """(csv, video files, offset) for every synced recording in a folder (a
+    track day), oldest recording first."""
+    out = []
+    for sc in sorted(Path(folder).glob("*.sync.json")):
+        try:
+            data = json.loads(sc.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        csv = data.get("csv")
+        parts = data.get("parts") or [str(sc)[:-len(".sync.json")]]
+        if not csv or not data.get("synced", "offset" in data) or not Path(csv).exists():
+            continue
+        if not all(Path(p).exists() for p in parts):
+            continue
+        out.append((csv, list(parts), float(data.get("offset", 0.0))))
+    return out

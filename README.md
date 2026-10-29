@@ -49,11 +49,8 @@ Video with a live overlay preview on the left; four tabs on the right.
   and it offers to load the whole recording as one video, without writing
   anything to disk. **Merge files…** joins any videos in an order you choose;
   **Save merged file** writes them as one MP4 losslessly.
-- **Import from GoPro card…:** lists the recordings on the card (newest first,
-  already-copied ones unticked), copies the ticked ones into a folder per day
-  (`<library>/2026-09-27/`) with chapters kept as-is, then matches each to a
-  data file in your data folder by syncing against every candidate from that
-  day, and opens the one you pick already synced. Nothing on the card changes.
+- **Videos imported in Race Analysis** open already synced to their data
+  file (the sync is saved next to the video).
 - **1 · Line it up:** **Auto-sync from GoPro sensors** matches the camera's
   accelerometer to the data file's g-forces (no camera GPS needed; needs the
   original GoPro files, since merged or re-encoded videos lose the sensor
@@ -119,6 +116,43 @@ Ctrl+←/→ one frame · Ctrl+Shift+←/→ gauges earlier/later by one frame �
 parallel (one per CPU core), only the gauge areas are sent to ffmpeg instead
 of full transparent frames, encoding uses your GPU when available (Intel Quick
 Sync, AMD, NVIDIA), and audio is added once at the end.
+
+## Race Analysis (at the track)
+
+Race Analysis is the app to keep open at the track; Race Overlay is for
+making the video afterwards. Start it from the app menu ("Race Analysis"),
+or with `raceoverlay --analysis [data.csv ...]` / `./launch.sh --analysis`.
+
+- **Import from GoPro card…:** lists the recordings on the card (newest first,
+  already-copied ones unticked), copies the ticked ones into a folder per day
+  (`<library>/2026-09-27/`) with chapters kept as-is, then matches each to a
+  data file in your data folder by syncing against every candidate from that
+  day. Matches are saved next to the video (so Race Overlay opens them synced)
+  and added to the analysis. Nothing on the card changes.
+- **Open track day…** loads every synced session in a day folder.
+  **Add data file…** adds one by hand; **Find video…** picks the GoPro file
+  for the selected session and syncs it from the camera's sensors.
+- **Lap list:** "Lap 5 – 2:19.806", gap to the reference (the fastest lap
+  unless you pick another with **Use as reference**), and sector times (equal
+  thirds of the lap). Best sectors are purple; the theoretical best adds them
+  up. Several sessions from the same track can be compared.
+- **Traces against distance:** delta to the reference, speed, and braking /
+  acceleration g for the reference plus up to four laps, with a legend. Laps
+  are lined up by GPS position on the reference lap.
+- **Turns:** with no setup, corners are found from speed dips and numbered
+  C1, C2… **Track turns…** names them like the official map: load the
+  track's map image, line it up by clicking the same spot on the image and on
+  your trace twice, then click each turn number. Split turns work: type 4A in
+  "Next turn" before clicking it and the next click becomes 4B. Saved per track and reused on
+  every visit (in `~/.local/share/raceoverlay/tracks/`).
+- **Per turn, for the selected lap:** time lost or gained in that turn's
+  stretch of track, minimum speed, where braking started vs the reference, and
+  the best any lap did there. Sorted worst first; click one to jump the video
+  to its braking zone.
+- **Track map:** coloured where the selected lap gained (green) or lost (red)
+  time; click it to move the cursor.
+- **Video:** the session's synced video follows the cursor, and the cursor
+  follows the video while it plays.
 
 ## CLI usage
 

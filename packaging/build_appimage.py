@@ -159,6 +159,7 @@ def main():
            "--specpath", str(work), "--paths", str(ROOT / "src"),
            "--collect-submodules", "raceoverlay",
            "--collect-submodules", "racecore",
+           "--collect-submodules", "raceanalysis",
            "--add-data", f"{src / 'fonts'}:raceoverlay/fonts",
            "--add-data", f"{src / 'icon.svg'}:raceoverlay",
            "--hidden-import", "mpv",
