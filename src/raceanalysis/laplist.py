@@ -47,6 +47,7 @@ class LapTree(QtWidgets.QTreeWidget):
             top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid})"])
             top.setData(0, QtCore.Qt.UserRole, ("session", si))
             top.setFirstColumnSpanned(True)
+            top.setToolTip(0, f"{s.name}\n{s.path}")
             top.setFlags(top.flags() & ~QtCore.Qt.ItemIsSelectable)
             self.addTopLevelItem(top)
             for ld in [x for x in a.laps if x.session == si]:
@@ -76,10 +77,23 @@ class LapTree(QtWidgets.QTreeWidget):
                         it.setForeground(c, QtGui.QColor(NEUTRAL))
                 top.addChild(it)
             top.setExpanded(True)
-        for c in range(self.ncol):
+        for c in range(1, self.ncol):
             self.resizeColumnToContents(c)
+        self._fit_lap_column()
         self.blockSignals(False)
         self.restyle(win)
+
+    def _fit_lap_column(self):
+        """Size the Lap column to the 'Lap 5 – 2:19.806' rows, not the session
+        name (that row spans the whole width and is cut off with '…')."""
+        opt = QtWidgets.QStyleOptionViewItem()
+        self.initViewItemOption(opt)
+        widest = 0
+        for it in self.lap_items():
+            idx = self.indexFromItem(it, 0)
+            widest = max(widest, self.itemDelegate(idx).sizeHint(opt, idx).width())
+        if widest:
+            self.setColumnWidth(0, widest + 2 * self.indentation() + 6)
 
     def lap_items(self):
         for i in range(self.topLevelItemCount()):
