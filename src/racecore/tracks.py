@@ -178,8 +178,10 @@ class TrackProfile:
         while not self.path and dest.exists() and not self._same_place(dest):
             dest = folder / f"{stem}_{n}.json"  # another track with the same name
             n += 1
-        if self.image and Path(self.image).exists() and Path(self.image).parent != dest.parent:
+        img = Path(self.image) if self.image else None
+        if img and img.exists() and (img.parent != dest.parent or img.stem != dest.stem):
             # keep our own copy so the profile still works if the original moves
+            # (or, for a track saved as a copy of another, if that one is deleted)
             copy = dest.parent / f"{dest.stem}{Path(self.image).suffix.lower()}"
             shutil.copyfile(self.image, copy)
             self.image = str(copy)

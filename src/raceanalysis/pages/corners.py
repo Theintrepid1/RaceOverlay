@@ -224,7 +224,7 @@ class CornersPage(QtWidgets.QWidget):
                 f"<b>{w.name(ld)}</b> vs reference: {fmt_gap(ld.time - a.ref.time)} s. ")
         self.caption.setText(
             head + (f"Turns from the {a.profile.name} map. " if named else
-                    "Corners found from speed (Track → Track turns… names them like the map). ")
+                    "Corners found from speed (the Track tab names them like the map). ")
             + "Click a turn to loop it on the video; shift-click for a run of turns.")
         t.setRowCount(len(res))
         for r, cr in enumerate(res):

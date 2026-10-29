@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
-"""Track turns dialog: put the official turn numbers on your GPS trace.
+"""Track turns editor (the Track tab): put the official turn numbers on your
+GPS trace.
 
 1. Load the track's map image (the one with the turn numbers). It's placed
    roughly over the trace.
@@ -13,6 +14,7 @@
    the list to rename it.
 
 Saved per track (racecore.tracks), so the next visit already has them.
+Edits stay in this editor until Save; Revert goes back to what's saved.
 """
 from __future__ import annotations
 
@@ -28,25 +30,22 @@ TURN = "#f2f1ec"
 PICK = "#c98500"
 
 
-class TurnsDialog(QtWidgets.QDialog):
-    def __init__(self, parent, a, profile: tracks.TrackProfile | None):
+class TurnsEditor(QtWidgets.QWidget):
+    saved = QtCore.Signal(object)      # the TrackProfile, after it's written
+    reverted = QtCore.Signal()
+    dirty_changed = QtCore.Signal(bool)
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Track turns")
-        self.resize(1300, 860)
-        self.a = a
-        lat0, lon0 = a.origin
-        if profile is None:
-            profile = tracks.TrackProfile(tracks.name_from_file(a.sessions[0].path),
-                                          lat0, lon0)
-        self.profile = profile
-        # everything is drawn in the profile's frame (its start line = 0,0)
-        ll = tracks.to_latlon(a.ref.xy, lat0, lon0)
-        self.trace = tracks.to_xy(ll[:, 0], ll[:, 1], profile.lat0, profile.lon0)
+        self.a = None
+        self.profile = None
+        self.trace = np.zeros((0, 2))
         self.img = None            # numpy RGBA
         self.img_item = None
         self.mode = None           # None | "align" | "place"
         self.pairs: list[tuple] = []
-        self._pending_img = None
+        self.dirty = False
+        self.cursor_item = None
 
         lay = QtWidgets.QHBoxLayout(self)
         self.plot = pg.PlotWidget()
@@ -59,7 +58,8 @@ class TurnsDialog(QtWidgets.QDialog):
 
         side = QtWidgets.QVBoxLayout()
         form = QtWidgets.QFormLayout()
-        self.name_edit = QtWidgets.QLineEdit(profile.name)
+        self.name_edit = QtWidgets.QLineEdit("")
+        self.name_edit.textEdited.connect(lambda _t: self._touch())
         form.addRow("Track", self.name_edit)
         side.addLayout(form)
         side.addWidget(_btn("1 · Load track map image…", self._load_image,
@@ -72,7 +72,7 @@ class TurnsDialog(QtWidgets.QDialog):
         side.addWidget(self.btn_place)
         nrow = QtWidgets.QHBoxLayout()
         nrow.addWidget(_note("Next turn"))
-        self.next_edit = QtWidgets.QLineEdit(profile.next_name())
+        self.next_edit = QtWidgets.QLineEdit("T1")
         self.next_edit.setToolTip("Name for the next turn you click. Type 4A for a "
                                   "split turn; the one after becomes 4B.")
         self.next_edit.textEdited.connect(lambda _t: self._hint())
@@ -99,20 +99,74 @@ class TurnsDialog(QtWidgets.QDialog):
         brow.addWidget(_btn("Delete turn", self._delete))
         brow.addWidget(_btn("Clear all", self._clear))
         side.addLayout(brow)
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Save
-                                        | QtWidgets.QDialogButtonBox.Cancel)
-        bb.accepted.connect(self._save)
-        bb.rejected.connect(self.reject)
-        side.addWidget(bb)
+        srow = QtWidgets.QHBoxLayout()
+        self.btn_revert = _btn("Revert", self.revert, "Throw away changes since the last save")
+        self.btn_save = _btn("Save", self.save, "Save this track and use its turns")
+        self.btn_save.setDefault(True)
+        srow.addWidget(self.btn_revert)
+        srow.addStretch(1)
+        srow.addWidget(self.btn_save)
+        side.addLayout(srow)
         w = QtWidgets.QWidget()
         w.setLayout(side)
         w.setFixedWidth(330)
         lay.addWidget(w)
+        self._set_dirty(False)
 
+    # ------------------------------------------------------------- data ---
+    def load(self, a, profile: tracks.TrackProfile | None, dirty: bool = False):
+        """Edit profile (a copy is made) against analysis a's reference lap.
+        None starts a new profile at this session's start line."""
+        import copy
+        self.a = a
+        lat0, lon0 = a.origin
+        if profile is None:
+            profile = tracks.TrackProfile(tracks.name_from_file(a.sessions[0].path),
+                                          lat0, lon0)
+        else:
+            profile = copy.deepcopy(profile)
+        self.profile = profile
+        # everything is drawn in the profile's frame (its start line = 0,0)
+        ll = tracks.to_latlon(a.ref.xy, lat0, lon0)
+        self.trace = tracks.to_xy(ll[:, 0], ll[:, 1], profile.lat0, profile.lon0)
+        self.img = None
+        self.mode = None
+        self.pairs = []
+        self.btn_place.setChecked(False)
+        self.name_edit.setText(profile.name)
+        self.next_edit.setText(profile.next_name())
         if profile.image:
             self._read_image(profile.image)
         self._draw()
+        self.plot.autoRange()
         self._hint()
+        self._set_dirty(dirty)
+
+    def retrace(self, a):
+        """The reference lap changed: redraw against it, keeping unsaved edits."""
+        if self.profile is None:
+            return
+        self.a = a
+        ll = tracks.to_latlon(a.ref.xy, *a.origin)
+        self.trace = tracks.to_xy(ll[:, 0], ll[:, 1], self.profile.lat0, self.profile.lon0)
+        self._draw()
+
+    def _touch(self):
+        self._set_dirty(True)
+
+    def _set_dirty(self, on: bool):
+        self.dirty = on
+        self.btn_save.setEnabled(self.profile is not None and (on or self.profile.path is None))
+        self.btn_revert.setEnabled(on)
+        self.dirty_changed.emit(on)
+
+    def show_cursor(self, d: float):
+        """The shared cursor (metres along the reference) as a dot on the trace."""
+        if self.cursor_item is None or self.a is None or not len(self.trace):
+            return
+        s = self.a._ref_s
+        k = int(np.clip(np.searchsorted(s, d), 0, len(self.trace) - 1))
+        self.cursor_item.setData([self.trace[k, 0]], [self.trace[k, 1]])
 
     # ------------------------------------------------------------ image ---
     def _read_image(self, path: str) -> bool:
@@ -135,6 +189,7 @@ class TurnsDialog(QtWidgets.QDialog):
         if p:
             self.profile.transform = None
             if self._read_image(p):
+                self._touch()
                 self._draw()
                 self._start_align()
 
@@ -146,6 +201,9 @@ class TurnsDialog(QtWidgets.QDialog):
     def _draw(self):
         self.plot.clear()
         self.img_item = None
+        self.cursor_item = None
+        if self.profile is None:
+            return
         ab = self.profile.ab()
         if self.img is not None and ab is not None:
             a, b = ab
@@ -170,6 +228,9 @@ class TurnsDialog(QtWidgets.QDialog):
                                   fill=pg.mkBrush(11, 11, 11, 170))
                 lbl.setPos(x, y)
                 self.plot.addItem(lbl)
+        self.cursor_item = self.plot.plot([], [], pen=None, symbol="o", symbolSize=12,
+                                          symbolPen=pg.mkPen("#0b0b0b", width=2),
+                                          symbolBrush=pg.mkBrush("#ffffff"))
         for img_pt, world_pt in self.pairs:
             if self.profile.ab() is not None:
                 ip = tracks.apply(*self.profile.ab(), [img_pt])[0]
@@ -184,7 +245,7 @@ class TurnsDialog(QtWidgets.QDialog):
         self.lst.blockSignals(True)
         cur = self.lst.currentRow()
         self.lst.clear()
-        for t in self.profile.turns:
+        for t in (self.profile.turns if self.profile is not None else []):
             it = QtWidgets.QListWidgetItem(t.name)
             it.setFlags(it.flags() | QtCore.Qt.ItemIsEditable)
             self.lst.addItem(it)
@@ -194,6 +255,9 @@ class TurnsDialog(QtWidgets.QDialog):
 
     # ------------------------------------------------------------ modes ---
     def _hint(self):
+        if self.profile is None:
+            self.msg.setText("")
+            return
         if self.mode == "align":
             n = len(self.pairs)
             step = n + 1 if self.pairs and self.pairs[-1][1] is not None or not self.pairs \
@@ -226,6 +290,9 @@ class TurnsDialog(QtWidgets.QDialog):
         self._hint()
 
     def _start_place(self):
+        if self.profile is None:
+            self.btn_place.setChecked(False)
+            return
         self.mode = "place" if self.btn_place.isChecked() else None
         self.pairs = []
         self._draw()
@@ -259,6 +326,7 @@ class TurnsDialog(QtWidgets.QDialog):
                     self.pairs = []
                     return
                 self.profile.set_ab(a, b)
+                self._touch()
                 self.pairs = []
                 self.mode = "place"
                 self.btn_place.setChecked(True)
@@ -276,6 +344,7 @@ class TurnsDialog(QtWidgets.QDialog):
         lat, lon = tracks.to_latlon([world], self.profile.lat0, self.profile.lon0)[0]
         self.profile.turns.append(tracks.Turn(self._next(), float(lat), float(lon)))
         self.next_edit.setText(self.profile.next_name())
+        self._touch()
         self._draw()
         self._hint()
 
@@ -284,6 +353,8 @@ class TurnsDialog(QtWidgets.QDialog):
 
     def _from_detected(self):
         a = self.a
+        if a is None or self.profile is None:
+            return
         saved, a.profile = a.profile, None
         a._find_corners()  # the detector's corners, not the profile's
         detected = list(a.corners)
@@ -295,6 +366,7 @@ class TurnsDialog(QtWidgets.QDialog):
             lat, lon = tracks.to_latlon([[x, y]], *a.origin)[0]
             self.profile.turns.append(tracks.Turn(self.profile.next_name(), float(lat), float(lon)))
         self.next_edit.setText(self.profile.next_name())
+        self._touch()
         self._draw()
         self.msg.setText(f"Added {len(detected)} turns from your corners. Rename them "
                          "to the track's numbers, add the ones it missed with "
@@ -307,6 +379,7 @@ class TurnsDialog(QtWidgets.QDialog):
             self.profile.turns[i].name = name
             if i == len(self.profile.turns) - 1:
                 self.next_edit.setText(self.profile.next_name())
+            self._touch()
             self._draw()
 
     def _delete(self):
@@ -314,20 +387,29 @@ class TurnsDialog(QtWidgets.QDialog):
         if 0 <= i < len(self.profile.turns):
             del self.profile.turns[i]
             self.next_edit.setText(self.profile.next_name())
+            self._touch()
             self._draw()
             self._hint()
 
     def _clear(self):
         self.profile.turns.clear()
         self.next_edit.setText(self.profile.next_name())
+        self._touch()
         self._draw()
         self._hint()
 
-    def _save(self):
+    def save(self) -> bool:
+        if self.profile is None:
+            return False
         self.profile.name = self.name_edit.text().strip() or self.profile.name
         try:
             self.profile.save()
         except OSError as e:
             QtWidgets.QMessageBox.warning(self, "Couldn't save", str(e))
-            return
-        self.accept()
+            return False
+        self._set_dirty(False)
+        self.saved.emit(self.profile)
+        return True
+
+    def revert(self):
+        self.reverted.emit()
