@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
-"""RaceAnalysis window: lap table, delta and speed traces against distance,
-track map, time lost per corner, and the video following the cursor.
+"""Race Analysis: the track-side app.
 
-Opened from Race Overlay ("Analyze laps…"), or on its own:
+Tabs (Overview, Laps, Corners & grip) all follow one shared state: the
+sessions loaded, the lap being looked at ("focus"), the laps overlaid on the
+plots ("compare"), the reference lap, and a cursor (metres along the
+reference lap). The video sits in its own panel beside the tabs, shown or
+hidden per tab, and follows the cursor. Any tab can pop out into its own
+window and goes back when that window is closed.
+
     python -m raceanalysis [data.csv ...]
     raceoverlay --analysis [data.csv ...]   (the AppImage)
 """
@@ -22,33 +27,30 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from racecore import analysis, gosync, ingest, telemetry, tracks
 from raceoverlay import media
-from raceoverlay.syncgui import (MpvNativeWidget, MpvWidget, _btn, _note,
-                                 pick_file, preview_mode, settings)
+from raceoverlay.syncgui import pick_file, preview_mode, settings
 
-# Series colours (fixed order, dark surface); reference = neutral grey.
-SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"]
-REF_COLOR = "#b5b4ad"
-GAIN, LOSS, NEUTRAL = "#199e70", "#e66767", "#6b6a64"
-CURSOR = "#f2f1ec"
-MAX_COMPARE = len(SERIES)
-FT = 3.28084
+from .common import FT, INK_DIM, MAX_COMPARE, MPH, REF_COLOR, SERIES, fmt_lap, session_name
+from .pages.corners import CornersPage
+from .pages.laps import LapsPage
+from .pages.overview import OverviewPage
+from .videopanel import VideoPanel
 
 
-def session_name(path: str) -> str:
-    """'Session 2 · Sep 27' for APEX Pro exports, else the file name."""
-    lg = ingest.log_info(path) if Path(path).exists() else None
-    if lg and lg.session and ingest.APEX_DATE_RE.search(Path(path).name):
-        return f"Session {lg.session} · {lg.date:%b %d}"
-    return Path(path).stem
+class PopOut(QtWidgets.QWidget):
+    """A tab page in its own window; closing it puts the page back."""
+    closed = QtCore.Signal(object)
 
+    def __init__(self, page, title):
+        super().__init__(None, QtCore.Qt.Window)
+        self.page = page
+        self.setWindowTitle(f"{title} – Race Analysis")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.addWidget(page)
 
-def fmt_lap(s: float) -> str:
-    m = int(s // 60)
-    return f"{m}:{s - 60 * m:06.3f}" if m else f"{s:.3f}"
-
-
-def fmt_gap(s: float) -> str:
-    return f"{s:+.2f}"
+    def closeEvent(self, ev):
+        self.closed.emit(self)
+        super().closeEvent(ev)
 
 
 class AnalysisWindow(QtWidgets.QMainWindow):
@@ -58,176 +60,412 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.a = analysis.Analysis()
         self.use_mph = settings().value("use_mph", True, type=bool)
-        self.compare: list[tuple[int, int]] = []   # lap keys shown, in colour order
-        self.focus: tuple[int, int] | None = None  # lap the video and corners follow
-        self.cursor_d = 0.0                        # metres along the reference
+        self.compare: list[tuple[int, int]] = []   # lap keys overlaid, in colour order
+        self.focus: tuple[int, int] | None = None  # lap the video, readout and turns follow
+        self.cursor_d = 0.0                        # metres along the reference lap
         self._video_session: int | None = None
         self._vt = 0.0
         self._duration = 0.0
-        self._following = False
         self._sync_job: dict | None = None
+        self._popouts: dict[str, PopOut] = {}
+        self._pending = False
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
-        self.resize(min(1680, int(avail.width() * 0.95)),
-                    min(1000, int(avail.height() * 0.92)))
-        self._build_ui()
-        self._summary()  # welcome text until a session is added
+        self.resize(min(1680, int(avail.width() * 0.96)),
+                    min(1040, int(avail.height() * 0.94)))
+        pg.setConfigOptions(antialias=True)
+        self._build()
+        self.refresh()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(50)
 
     # ================================================================ UI ===
-    def _build_ui(self):
-        pg.setConfigOptions(antialias=True)
-        outer = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+    def _build(self):
+        mb = self.menuBar()
+        m = mb.addMenu("&File")
+        m.addAction("Import from GoPro card…", self.import_card, "Ctrl+I")
+        m.addAction("Open track day…", self.open_day, "Ctrl+O")
+        m.addAction("Add data file…", self.add_session_dialog)
+        m.addSeparator()
+        self.act_find = m.addAction("Find video for this session…", self.find_video)
+        self.act_remove = m.addAction("Remove this session", self.remove_session)
+        m.addSeparator()
+        m.addAction("Close", self.close, "Ctrl+W")
+        m = mb.addMenu("&Track")
+        self.act_turns = m.addAction("Track turns…", self.edit_turns)
+        m = mb.addMenu("&View")
+        self.act_video = m.addAction("Show video on this tab", self._toggle_video, "V")
+        self.act_video.setCheckable(True)
+        m.addAction("Pop out this tab", self._pop_current, "Ctrl+Shift+P")
 
-        # ---- left: video over track map
-        left = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        vbox = QtWidgets.QWidget()
-        vl = QtWidgets.QVBoxLayout(vbox)
-        vl.setContentsMargins(0, 0, 0, 0)
-        native = (preview_mode() == "native"
-                  and QtGui.QGuiApplication.platformName() == "xcb")
-        self.video = MpvNativeWidget() if native else MpvWidget()
-        self.video.setMinimumSize(320, 180)
-        self.player = self.video.player
-        vl.addWidget(self.video, 1)
-        crow = QtWidgets.QHBoxLayout()
-        self.btn_play = _btn("Play", self._toggle_play)
-        crow.addWidget(_btn("-2s", lambda: self._step(-2.0)))
-        crow.addWidget(self.btn_play)
-        crow.addWidget(_btn("+2s", lambda: self._step(2.0)))
-        self.video_lbl = _note("")
-        crow.addWidget(self.video_lbl, 1)
-        vl.addLayout(crow)
-        left.addWidget(vbox)
-        self.map = pg.PlotWidget()
-        self.map.setAspectLocked(True)
-        self.map.hideAxis("left")
-        self.map.hideAxis("bottom")
-        self.map.setMenuEnabled(False)
-        self.map.scene().sigMouseClicked.connect(self._map_clicked)
-        self.gg = pg.PlotWidget()
-        self.gg.setAspectLocked(True)
-        self.gg.setMenuEnabled(False)
-        for ax in ("left", "bottom"):
-            self.gg.getAxis(ax).enableAutoSIPrefix(False)
-        self.gg.setLabel("bottom", "Lateral g (right +)")
-        self.gg.setLabel("left", "Brake – / accel + (g)")
-        self.gg_turn: int | None = None   # turn highlighted on the g-g diagram
-        self.left_tabs = QtWidgets.QTabWidget()
-        self.left_tabs.addTab(self.map, "Track map")
-        self.left_tabs.addTab(self.gg, "g-g (grip)")
-        left.addWidget(self.left_tabs)
-        left.setSizes([420, 420])
-        outer.addWidget(left)
+        central = QtWidgets.QWidget()
+        cl = QtWidgets.QVBoxLayout(central)
+        cl.setContentsMargins(6, 4, 6, 4)
+        cl.setSpacing(4)
 
-        # ---- right: tools, tables, traces
-        right = QtWidgets.QWidget()
-        rl = QtWidgets.QVBoxLayout(right)
-        rl.setContentsMargins(6, 0, 0, 0)
-        tools = QtWidgets.QHBoxLayout()
-        tools.addWidget(_btn("Import from GoPro card…", self._import_card,
-                             "Copy new recordings off the card into a folder per "
-                             "track day, match each to its data file and sync it"))
-        tools.addWidget(_btn("Open track day…", self._open_day,
-                             "Load every synced session in a track-day folder"))
-        tools.addWidget(_btn("Add data file…", self._add_session_dialog,
-                             "Add a data file from the same track"))
-        tools.addWidget(_btn("Find video…", self._find_video,
-                             "Pick the GoPro video for the selected session and "
-                             "sync it from the camera's sensors"))
-        tools.addWidget(_btn("Remove session", self._remove_session))
-        tools.addWidget(_btn("Use as reference", self._set_reference,
-                             "Compare everything against the selected lap"))
-        tools.addWidget(_btn("Track turns…", self._edit_turns,
-                             "Name the turns like the official track map"))
-        tools.addStretch(1)
-        rl.addLayout(tools)
-        self.summary = _note("")
-        rl.addWidget(self.summary)
+        # ---- top bar
+        bar = QtWidgets.QHBoxLayout()
+        bar.addWidget(QtWidgets.QLabel("Lap"))
+        self.lap_pick = QtWidgets.QComboBox()
+        self.lap_pick.setMinimumContentsLength(24)
+        self.lap_pick.activated.connect(
+            lambda i: self.lap_focused(self.lap_pick.itemData(i)))
+        bar.addWidget(self.lap_pick)
+        bar.addSpacing(12)
+        bar.addWidget(QtWidgets.QLabel("Reference"))
+        self.ref_pick = QtWidgets.QComboBox()
+        self.ref_pick.setMinimumContentsLength(24)
+        self.ref_pick.setToolTip("Everything is compared against this lap")
+        self.ref_pick.activated.connect(lambda i: self.set_reference(self.ref_pick.itemData(i)))
+        bar.addWidget(self.ref_pick)
+        bar.addSpacing(12)
+        self.info = QtWidgets.QLabel("")
+        self.info.setStyleSheet(f"color:{INK_DIM};")
+        bar.addWidget(self.info, 1)
+        self.btn_video = QtWidgets.QToolButton()
+        self.btn_video.setText("Video")
+        self.btn_video.setCheckable(True)
+        self.btn_video.setToolTip("Show the video beside this tab (V)")
+        self.btn_video.toggled.connect(self._set_video_visible)
+        bar.addWidget(self.btn_video)
+        cl.addLayout(bar)
 
-        rsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        tables = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self.lap_tree = QtWidgets.QTreeWidget()
-        self.lap_tree.setHeaderLabels(["Lap", "Gap", "Grip", "S1", "S2", "S3"])
-        self.lap_tree.headerItem().setToolTip(
-            2, "Grip used while cornering and braking, against the best you've shown "
-               "the car can do (100%)")
-        self.lap_tree.setRootIsDecorated(True)
-        self.lap_tree.setUniformRowHeights(True)
-        self.lap_tree.header().setStretchLastSection(False)
-        self.lap_tree.itemChanged.connect(self._lap_checked)
-        self.lap_tree.currentItemChanged.connect(self._lap_selected)
-        # clicking the row you're already on brings it back if it was unticked
-        self.lap_tree.itemClicked.connect(
-            lambda it, col: col > 0 and self._lap_selected(it, None))
-        tables.addWidget(self.lap_tree)
-        cbox = QtWidgets.QWidget()
-        cl = QtWidgets.QVBoxLayout(cbox)
-        cl.setContentsMargins(0, 0, 0, 0)
-        self.corner_lbl = _note("")
-        cl.addWidget(self.corner_lbl)
-        self.corner_tbl = QtWidgets.QTableWidget(0, 6)
-        self.corner_tbl.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.corner_tbl.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.corner_tbl.verticalHeader().setVisible(False)
-        self.corner_tbl.cellClicked.connect(self._corner_clicked)
-        cl.addWidget(self.corner_tbl, 1)
-        tables.addWidget(cbox)
-        tables.setSizes([520, 520])
-        rsplit.addWidget(tables)
+        # ---- tabs | video
+        self.split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
+        self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self)]
+        for p in self.pages:
+            self.tabs.addTab(p, p.title.replace("&", "&&"))
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.split.addWidget(self.tabs)
+        self.videop = VideoPanel()
+        self.player = self.videop.player
+        self.split.addWidget(self.videop)
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 2)
+        state = settings().value("analysis/split")
+        if state is None or not self.split.restoreState(state):
+            self.split.setSizes([900, 520])
+        self.split.splitterMoved.connect(
+            lambda *_: settings().setValue("analysis/split", self.split.saveState()))
+        cl.addWidget(self.split, 1)
+        self.setCentralWidget(central)
+        self.tabs.setCurrentIndex(int(settings().value("analysis/tab", 0)))
+        self._tab_changed(self.tabs.currentIndex())
 
-        self.traces = pg.GraphicsLayoutWidget()
-        self.p_delta = self.traces.addPlot(row=0, col=0)
-        self.p_speed = self.traces.addPlot(row=1, col=0)
-        self.p_long = self.traces.addPlot(row=2, col=0)
-        self.p_grip = self.traces.addPlot(row=3, col=0)
-        self.plots = [self.p_delta, self.p_speed, self.p_long, self.p_grip]
-        for p in self.plots:
-            p.showGrid(x=True, y=True, alpha=0.15)
-            for ax in ("left", "bottom"):
-                p.getAxis(ax).enableAutoSIPrefix(False)  # g, not mg
-            p.setMenuEnabled(False)
-            p.getAxis("left").setWidth(52)
-            if p is not self.p_delta:
-                p.setXLink(self.p_delta)
-        self.p_delta.setLabel("left", "Delta vs ref (s)")
-        self.p_long.setLabel("left", "Brake – / accel + (g)")
-        self.p_grip.setLabel("left", "Grip used (%)")
-        self.cursors = []
-        for p in self.plots:
-            ln = pg.InfiniteLine(angle=90, movable=True,
-                                 pen=pg.mkPen(CURSOR, width=1))
-            ln.sigDragged.connect(lambda l: self.set_cursor(self._from_x(l.value())))
-            p.addItem(ln, ignoreBounds=True)
-            self.cursors.append(ln)
-        self.traces.scene().sigMouseClicked.connect(self._traces_clicked)
-        rsplit.addWidget(self.traces)
-        rsplit.setSizes([300, 560])
-        rl.addWidget(rsplit, 1)
-        outer.addWidget(right)
-        outer.setSizes([560, 1100])
-        self.setCentralWidget(outer)
-
-    # ============================================================ helpers ===
-    def _x(self, metres):
+    # ------------------------------------------------------------ helpers
+    def x(self, metres):
         return np.asarray(metres) * FT if self.use_mph else np.asarray(metres)
 
-    def _from_x(self, x: float) -> float:
+    def from_x(self, x: float) -> float:
         return x / FT if self.use_mph else x
 
-    def _dist_unit(self) -> str:
+    def dist_unit(self) -> str:
         return "ft" if self.use_mph else "m"
 
-    def _spd(self, kmh):
-        return np.asarray(kmh) * (0.621371 if self.use_mph else 1.0)
+    def speed_unit(self) -> str:
+        return "mph" if self.use_mph else "km/h"
 
-    def _name(self, ld) -> str:
-        """'Lap 5 – 2:19.806' (with the session name when there are several)."""
-        return f"{ld.label(self.a.sessions)}  –  {fmt_lap(ld.time)}"
+    def spd(self, kmh):
+        return np.asarray(kmh) * (MPH if self.use_mph else 1.0)
 
-    def _lap(self, key) -> analysis.LapData | None:
+    def lap(self, key) -> analysis.LapData | None:
         return next((ld for ld in self.a.laps if ld.key == key), None)
+
+    def focus_lap(self) -> analysis.LapData | None:
+        return self.lap(self.focus) if self.focus else None
+
+    def label(self, ld) -> str:
+        return ld.label(self.a.sessions)
+
+    def name(self, ld) -> str:
+        """'Lap 5 – 2:19.806' (with the session name when there are several)."""
+        return f"{self.label(ld)}  –  {fmt_lap(ld.time)}"
+
+    def color(self, key) -> str:
+        if key in self.compare:
+            return SERIES[self.compare.index(key)]
+        ld = self.lap(key)
+        return REF_COLOR if ld is not None and ld is self.a.ref else SERIES[0]
+
+    def status(self, text: str, ms: int = 8000):
+        self.statusBar().showMessage(text, ms)
+
+    # ============================================================== state ===
+    def lap_focused(self, key):
+        """A lap was picked (lap list, top bar, lap-time chart)."""
+        if key is None or self.lap(key) is None:
+            return
+        self.focus = key
+        if key not in self.compare and self.lap(key) is not self.a.ref:
+            if len(self.compare) >= MAX_COMPARE:
+                self.compare.pop(0)
+            self.compare.append(key)
+        self._later(self._laps_changed)
+
+    def lap_checked(self, key, on: bool):
+        ld = self.lap(key)
+        if ld is not None and ld is not self.a.ref:   # the reference is always shown
+            if on and key not in self.compare:
+                if len(self.compare) >= MAX_COMPARE:
+                    self.compare.pop(0)
+                self.compare.append(key)
+            elif not on and key in self.compare:
+                self.compare.remove(key)
+        self._later(self._laps_changed)
+
+    def _later(self, fn):
+        """Run after the click that caused it has finished (a list must never
+        be rebuilt from inside its own click handler)."""
+        if not self._pending:
+            self._pending = True
+
+            def run():
+                self._pending = False
+                fn()
+            QtCore.QTimer.singleShot(0, run)
+
+    def set_reference(self, key):
+        ld = self.lap(key)
+        if ld is None or not ld.timed or ld is self.a.ref:
+            return
+        self.a.set_reference(ld)
+        self.compare = [k for k in self.compare if k != key]
+        self.refresh()
+
+    def goto_turn(self, n: int):
+        """Open the Corners & grip tab on turn n."""
+        page = self._page(CornersPage)
+        self._show_page(page)
+        page.show_turn(n)
+
+    def zoom(self, d0, d1):
+        self._page(LapsPage).zoom(d0, d1)
+
+    def _page(self, cls):
+        return next(p for p in self.pages if isinstance(p, cls))
+
+    # ============================================================ refresh ===
+    def refresh(self):
+        """Sessions, reference or turns changed: rebuild everything."""
+        self._fill_pickers()
+        for p in self.pages:
+            p.refresh()
+        self._info()
+        self._load_video()
+        self.set_cursor(self.cursor_d)
+        has = self.a.ref is not None
+        for act in (self.act_find, self.act_remove, self.act_turns):
+            act.setEnabled(has)
+
+    def _laps_changed(self):
+        self._sync_pickers()
+        for p in self.pages:
+            p.laps_changed()
+        self._load_video()
+        self.set_cursor(self.cursor_d)
+
+    def _fill_pickers(self):
+        a = self.a
+        for cb in (self.lap_pick, self.ref_pick):
+            cb.blockSignals(True)
+            cb.clear()
+        for ld in a.laps:
+            txt = self.name(ld) + ("" if ld.timed else "  (slow)")
+            self.lap_pick.addItem(txt, ld.key)
+            if ld.timed:
+                self.ref_pick.addItem(self.name(ld), ld.key)
+        for cb in (self.lap_pick, self.ref_pick):
+            cb.blockSignals(False)
+        self._sync_pickers()
+
+    def _sync_pickers(self):
+        for cb, key in ((self.lap_pick, self.focus),
+                        (self.ref_pick, self.a.ref.key if self.a.ref else None)):
+            i = cb.findData(key)
+            cb.blockSignals(True)
+            cb.setCurrentIndex(i)
+            cb.blockSignals(False)
+
+    def _info(self):
+        a = self.a
+        if a.ref is None:
+            self.info.setText("")
+            return
+        names = ", ".join(s.name for s in a.sessions)
+        track = a.profile.name if a.profile is not None else ""
+        self.info.setText(f"{track + ' · ' if track else ''}{names}")
+
+    # ============================================================== tabs ===
+    def _tab_changed(self, i):
+        if i < 0:
+            return
+        settings().setValue("analysis/tab", i)
+        page = self.tabs.widget(i)
+        on = settings().value(f"analysis/video/{page.title}", page.video_default, type=bool)
+        self.btn_video.blockSignals(True)
+        self.btn_video.setChecked(on)
+        self.btn_video.blockSignals(False)
+        self.act_video.setChecked(on)
+        self.videop.setVisible(on)
+
+    def _set_video_visible(self, on: bool):
+        page = self.tabs.currentWidget()
+        if page is not None:
+            settings().setValue(f"analysis/video/{page.title}", on)
+        self.act_video.setChecked(on)
+        self.videop.setVisible(on)
+        if not on:
+            self.videop.pause()
+
+    def _toggle_video(self):
+        self.btn_video.setChecked(not self.btn_video.isChecked())
+
+    def _tab_menu(self, pos):
+        i = self.tabs.tabBar().tabAt(pos)
+        if i < 0:
+            return
+        m = QtWidgets.QMenu(self)
+        m.addAction("Pop out into its own window", lambda: self.pop_out(self.tabs.widget(i)))
+        m.exec(self.tabs.tabBar().mapToGlobal(pos))
+
+    def _pop_current(self):
+        if self.tabs.currentWidget() is not None:
+            self.pop_out(self.tabs.currentWidget())
+
+    def pop_out(self, page):
+        if page.title in self._popouts or self.tabs.count() <= 1:
+            return
+        self.tabs.removeTab(self.tabs.indexOf(page))
+        w = PopOut(page, page.title)
+        geo = settings().value(f"analysis/popout/{page.title}")
+        if geo is None or not w.restoreGeometry(geo):
+            w.resize(1000, 700)
+        w.closed.connect(self._pop_closed)
+        self._popouts[page.title] = w
+        settings().setValue(f"analysis/popped/{page.title}", True)
+        w.show()
+        page.show()
+
+    def _pop_closed(self, w: PopOut):
+        page = w.page
+        settings().setValue(f"analysis/popout/{page.title}", w.saveGeometry())
+        if not getattr(self, "_closing", False):
+            settings().setValue(f"analysis/popped/{page.title}", False)
+        self._popouts.pop(page.title, None)
+        idx = min(self.pages.index(page), self.tabs.count())
+        self.tabs.insertTab(idx, page, page.title.replace("&", "&&"))
+        page.show()
+
+    def _show_page(self, page):
+        if page.title in self._popouts:
+            w = self._popouts[page.title]
+            w.raise_()
+            w.activateWindow()
+        else:
+            self.tabs.setCurrentWidget(page)
+
+    def restore_popouts(self):
+        for p in list(self.pages):
+            if settings().value(f"analysis/popped/{p.title}", False, type=bool):
+                self.pop_out(p)
+
+    # ============================================================= cursor ===
+    def set_cursor(self, d: float, seek: bool = False):
+        a = self.a
+        if a.ref is None:
+            self.videop.strip.show_values("–", "–", "–", self.speed_unit(), None)
+            return
+        d = float(np.clip(d, 0.0, a.length))
+        self.cursor_d = d
+        for p in self.pages:
+            p.cursor(d)
+        ld = self.focus_lap() or a.ref
+        t_into = a.time_at(ld, d)
+        spd = float(self.spd(np.interp(d, a.grid, a.channel_on_grid(ld, "speed"))))
+        dl = None if ld is a.ref else float(np.interp(d, a.grid, a.delta(ld)))
+        gear = rpm = None
+        r = self._channel_at(ld, "rpm", d)
+        if r is not None and r > 0:
+            rpm = f"{r:,.0f}"
+        note = ""
+        v = self.a.sessions[ld.session].video
+        if not v:
+            note = "No synced video for this session (File → Find video for this session…)."
+        elif seek and not self._seek_lap(ld, t_into):
+            note = "This point isn't in the video."
+        self.videop.strip.show_values(f"{ld.lap.n}", fmt_lap(t_into, 1), f"{spd:.0f}",
+                                      self.speed_unit(), dl, gear, rpm, note)
+
+    def _channel_at(self, ld, name, d):
+        ch = self.a.sessions[ld.session].tel.channels.get(name)
+        if ch is None:
+            return None
+        s = self.a.sessions[ld.session]
+        t = s.tel.time
+        tt = ld.lap.start + self.a.time_at(ld, d)
+        val = float(np.interp(tt, t, np.nan_to_num(ch)))
+        return val
+
+    # ============================================================== video ===
+    def _load_video(self):
+        ld = self.focus_lap()
+        si = ld.session if ld is not None else None
+        if si == self._video_session:
+            return
+        self._video_session = si
+        s = self.a.sessions[si] if si is not None else None
+        if s is None or not s.video:
+            self._duration = 0.0
+            self.videop.stop()
+            return
+        parts, _off = s.video
+        try:
+            info = media.probe(parts)
+            self._duration = info.duration
+            self.videop.set_aspect(info.width, info.height)
+        except Exception:
+            self._duration = 0.0
+        self.videop.load(media.mpv_url(parts))
+        QtCore.QTimer.singleShot(400, lambda: self.set_cursor(self.cursor_d, seek=True))
+
+    def _session_video(self, ld):
+        s = self.a.sessions[ld.session]
+        return s.video if s.video and ld.session == self._video_session else None
+
+    def _seek_lap(self, ld, t_into: float) -> bool:
+        v = self._session_video(ld)
+        if not v:
+            return False
+        vt = ld.lap.start + t_into - v[1]
+        if self._duration and not (0 <= vt <= self._duration):
+            return False
+        self.videop.seek(vt)
+        self._vt = vt
+        return True
+
+    def _tick(self):
+        if self._sync_job is not None and self._sync_job["done"]:
+            self._finish_find_video()
+        ld = self.focus_lap()
+        if ld is None:
+            return
+        paused, vt = self.videop.state()
+        self.videop.btn_play.setText("Play" if paused else "Pause")
+        v = self._session_video(ld)
+        if vt is None or not v:
+            return
+        # follow the video while it plays, and once more after it pauses or
+        # steps, so the cursor ends on the frame that's showing
+        if paused and abs(float(vt) - self._vt) < 1e-3:
+            return
+        self._vt = float(vt)
+        t_into = float(vt) + v[1] - ld.lap.start
+        if 0 <= t_into <= ld.time:
+            self.set_cursor(self.a.dist_at(ld, t_into))
 
     # ========================================================== sessions ===
     def add_session(self, path: str, tel=None, video=None, quiet=False,
@@ -250,13 +488,14 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return str(e)
         if len(self.a.sessions) == 1 and self.a.origin:
             self.a.use_profile(tracks.find(*self.a.origin))
-        if self.focus is None or self._lap(self.focus) is None:
+        if self.focus is None or self.lap(self.focus) is None:
             self._default_selection()
         if refresh:
-            self._refresh()
+            self._video_session = None
+            self.refresh()
         return None
 
-    def _add_many(self, items: list[tuple[str, list[str] | None, float | None]]):
+    def add_many(self, items):
         """Add (csv, video files, offset) sessions; one message for problems."""
         added, problems = 0, []
         for csv, parts, off in items:
@@ -267,127 +506,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             elif why != "already open":
                 problems.append(f"{Path(csv).name}: {why}")
         self._video_session = None
-        self._refresh()
+        self.refresh()
         if problems:
-            QtWidgets.QMessageBox.warning(self, "Some files weren't added",
-                                          "\n".join(problems))
+            QtWidgets.QMessageBox.warning(self, "Some files weren't added", "\n".join(problems))
         return added
-
-    def _import_card(self):
-        from .importer import ImportDialog
-        dlg = ImportDialog(self)
-        if dlg.exec() and dlg.result:
-            n = self._add_many(dlg.result)
-            self.summary.setText(self.summary.text() +
-                                 f" &nbsp; <i>Imported: {n} session(s) added.</i>")
-
-    def _open_day(self):
-        from .importer import _pick_dir
-        s = settings()
-        lib = s.value("import/library", "")
-        start = s.value("analysis/day", "") or lib
-        d = _pick_dir(self, "Track-day folder", start)
-        if not d:
-            return
-        s.setValue("analysis/day", d)
-        found = ingest.synced_sessions(d)
-        if not found:
-            QtWidgets.QMessageBox.information(
-                self, "Nothing synced here",
-                "No synced videos in this folder. Import from the card first, or "
-                "use Add data file… and Find video….")
-            return
-        self._add_many(found)
-
-    def _edit_turns(self):
-        if self.a.ref is None:
-            return
-        from .turns import TurnsDialog
-        dlg = TurnsDialog(self, self.a, self.a.profile)
-        if dlg.exec():
-            self.a.use_profile(dlg.profile)
-            self._refresh()
-
-    # ------------------------------------------------------- find video ---
-    def _selected_session(self) -> int | None:
-        it = self.lap_tree.currentItem()
-        if it is None:
-            return None
-        data = it.data(0, QtCore.Qt.UserRole)
-        return data[1] if data[0] == "session" else data[1][0]
-
-    def _find_video(self):
-        si = self._selected_session()
-        if si is None or self._sync_job is not None:
-            return
-        s = self.a.sessions[si]
-        p = pick_file(self, f"GoPro video for {s.name}", "video",
-                      "Video (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
-        if not p:
-            return
-        parts = media.find_chapters(p)
-        tel = s.tel
-        job = {"si": si, "parts": parts, "done": False, "res": None, "err": None}
-        self._sync_job = job
-        self.summary.setText(f"Syncing {Path(p).name} to {s.name} from the camera's "
-                             "sensors…")
-
-        def work():
-            try:
-                info = media.probe(parts)
-                res, *_ = gosync.sync_parts([(x.path, x.start) for x in info.parts], tel)
-                job["res"] = res
-            except gosync.NoCameraData:
-                job["err"] = ("This video has no GoPro sensor track (merged or "
-                              "re-encoded files lose it). Pick the original "
-                              "GH01xxxx file.")
-            except Exception as e:  # noqa: BLE001
-                job["err"] = str(e)
-            job["done"] = True
-        threading.Thread(target=work, daemon=True).start()
-
-    def _finish_find_video(self):
-        job, self._sync_job = self._sync_job, None
-        if job["err"]:
-            QtWidgets.QMessageBox.warning(self, "Couldn't sync", job["err"])
-            self._summary()
-            return
-        res = job["res"]
-        if not res.confident:
-            r = QtWidgets.QMessageBox.question(
-                self, "Weak match",
-                f"The best match is weak ({res.score:.0%}, next best "
-                f"{res.runner_up:.0%}). The video may be from another session.\n\n"
-                f"Use it anyway (offset {res.offset:+.2f} s)?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No)
-            if r != QtWidgets.QMessageBox.Yes:
-                self._summary()
-                return
-        s = self.a.sessions[job["si"]]
-        s.video = (job["parts"], res.offset)
-        ingest.save_pairing(job["parts"], s.path, res.offset)
-        self._video_session = None
-        self._refresh()
-
-    def _add_session_dialog(self):
-        p = pick_file(self, "Add a data file", "csv",
-                      "Telemetry (*.csv *.CSV *.txt);;All files (*)")
-        if p:
-            self.add_session(p)
-
-    def _remove_session(self):
-        it = self.lap_tree.currentItem()
-        if it is None or not self.a.sessions:
-            return
-        data = it.data(0, QtCore.Qt.UserRole)
-        si = data[1] if data[0] == "session" else data[1][0]
-        self.a.remove(si)
-        self.compare, self.focus = [], None
-        self._video_session = None
-        if self.a.sessions:
-            self._default_selection()
-        self._refresh()
 
     def _default_selection(self):
         """Reference plus the latest timed lap, which the video follows."""
@@ -398,547 +520,129 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if last is self.a.ref and len(timed) > 1:
             last = sorted(timed, key=lambda ld: ld.time)[1]
         self.focus = last.key
-        self.compare = [last.key]
+        self.compare = [last.key] if last is not self.a.ref else []
 
-    def _set_reference(self):
-        ld = self._lap(self.focus) if self.focus else None
-        if ld is None or not ld.timed:
+    def import_card(self):
+        from .importer import ImportDialog
+        dlg = ImportDialog(self)
+        if dlg.exec() and dlg.result:
+            n = self.add_many(dlg.result)
+            self.status(f"Imported: {n} session(s) added.")
+
+    def open_day(self):
+        from .importer import _pick_dir
+        s = settings()
+        start = s.value("analysis/day", "") or s.value("import/library", "")
+        d = _pick_dir(self, "Track-day folder", start)
+        if not d:
             return
-        self.a.set_reference(ld)
-        self.compare = [k for k in self.compare if k != ld.key]
-        self._refresh()
-
-    # ============================================================ refresh ===
-    def _refresh(self):
-        self._fill_laps()
-        self._draw_traces()
-        self._draw_map()
-        self._draw_gg()
-        self._fill_corners()
-        self._summary()
-        self._load_video()
-        self.set_cursor(self.cursor_d)
-
-    def _summary(self):
-        a = self.a
-        if a.ref is None:
-            self.summary.setText(
-                "<b>At the track:</b> Import from GoPro card… copies the new "
-                "recordings and matches them to your data files. "
-                "<b>Later:</b> Open track day… loads a day you imported before.")
+        s.setValue("analysis/day", d)
+        found = ingest.synced_sessions(d)
+        if not found:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing synced here",
+                "No synced videos in this folder. Import from the card first, or use "
+                "File → Add data file… and Find video for this session….")
             return
-        bs = a.best_sectors()
-        parts = " + ".join(f"S{k + 1} lap {ld.lap.n}" for k, (_, ld) in enumerate(bs))
-        txt = (f"<b>Reference:</b> {self._name(a.ref)}"
-               f" &nbsp; <b>Theoretical best:</b> {fmt_lap(a.theoretical_best())}"
-               f" <small>({parts})</small>")
-        self.summary.setText(txt)
+        self.add_many(found)
 
-    def _fill_laps(self):
-        a = self.a
-        tree = self.lap_tree
-        tree.blockSignals(True)
-        tree.clear()
-        if a.ref is None:
-            tree.blockSignals(False)
-            return
-        best = a.ref.time
-        bsec = [t for t, _ in a.best_sectors()]
-        purple = QtGui.QColor("#b38cff")
-        for si, s in enumerate(a.sessions):
-            vid = "video" if s.video else "no video"
-            top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid})"])
-            top.setData(0, QtCore.Qt.UserRole, ("session", si))
-            top.setFirstColumnSpanned(True)
-            tree.addTopLevelItem(top)
-            for ld in [x for x in a.laps if x.session == si]:
-                row = [f"Lap {ld.lap.n}  –  {fmt_lap(ld.time)}",
-                       "" if ld is a.ref else (fmt_gap(ld.time - best) if ld.timed else "slow")]
-                lg = a.lap_grip(ld)
-                row += [f"{lg * 100:.0f}%" if lg is not None else ""]
-                row += [f"{t:.2f}" for t in ld.sectors]
-                it = QtWidgets.QTreeWidgetItem(row)
-                it.setData(0, QtCore.Qt.UserRole, ("lap", ld.key))
-                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
-                it.setCheckState(0, QtCore.Qt.Unchecked)  # set in _restyle_laps
-                for c in range(1, 6):
-                    it.setTextAlignment(c, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                if ld is a.ref:
-                    f = it.font(0)
-                    f.setBold(True)
-                    for c in range(6):
-                        it.setFont(c, f)
-                    it.setText(1, "ref")
-                for k, t in enumerate(ld.sectors):
-                    if ld.timed and abs(t - bsec[k]) < 1e-9:
-                        it.setForeground(3 + k, purple)
-                if not ld.timed:
-                    for c in range(6):
-                        it.setForeground(c, QtGui.QColor(NEUTRAL))
-                top.addChild(it)
-            top.setExpanded(True)
-        for c in range(6):
-            tree.resizeColumnToContents(c)
-        tree.blockSignals(False)
-        self._restyle_laps()
+    def add_session_dialog(self):
+        p = pick_file(self, "Add a data file", "csv",
+                      "Telemetry (*.csv *.CSV *.txt);;All files (*)")
+        if p:
+            self.add_session(p)
 
-    def _lap_items(self):
-        tree = self.lap_tree
-        for i in range(tree.topLevelItemCount()):
-            top = tree.topLevelItem(i)
-            for j in range(top.childCount()):
-                yield top.child(j)
-
-    def _restyle_laps(self):
-        """Check marks, colours and the current row, on the existing rows.
-        Never clears the tree, so it is safe to call after a click on it."""
-        a, tree = self.a, self.lap_tree
-        tree.blockSignals(True)
-        default = tree.palette().color(QtGui.QPalette.Text)
-        for it in self._lap_items():
-            key = it.data(0, QtCore.Qt.UserRole)[1]
-            ld = self._lap(key)
-            if ld is None:
-                continue
-            shown = key in self.compare or ld is a.ref
-            want = QtCore.Qt.Checked if shown else QtCore.Qt.Unchecked
-            if it.checkState(0) != want:
-                it.setCheckState(0, want)
-            if key in self.compare:
-                it.setForeground(0, QtGui.QColor(SERIES[self.compare.index(key)]))
-            elif ld.timed:
-                it.setForeground(0, default)
-            if key == self.focus and tree.currentItem() is not it:
-                tree.setCurrentItem(it)
-        tree.blockSignals(False)
-
-    def _lap_checked(self, it, col):
-        data = it.data(0, QtCore.Qt.UserRole)
-        if not data or data[0] != "lap":
-            return
-        key = data[1]
-        ld = self._lap(key)
-        checked = it.checkState(0) == QtCore.Qt.Checked
-        if ld is not self.a.ref:  # the reference is always shown
-            if checked and key not in self.compare:
-                if len(self.compare) >= MAX_COMPARE:
-                    self.compare.pop(0)
-                self.compare.append(key)
-            elif not checked and key in self.compare:
-                self.compare.remove(key)
-        # Qt is still inside this click: update after it returns
-        QtCore.QTimer.singleShot(0, self._compare_changed)
-
-    def _compare_changed(self):
-        self._restyle_laps()
-        self._draw_traces()
-        self._draw_map()
-        self._draw_gg()
-
-    def _lap_selected(self, it, _prev):
-        if it is None:
-            return
-        data = it.data(0, QtCore.Qt.UserRole)
-        if not data or data[0] != "lap":
-            return
-        self.focus = data[1]
-        if self.focus not in self.compare and self._lap(self.focus) is not self.a.ref:
-            if len(self.compare) >= MAX_COMPARE:
-                self.compare.pop(0)
-            self.compare.append(self.focus)
-        QtCore.QTimer.singleShot(0, self._focus_changed)
-
-    def _focus_changed(self):
-        self._restyle_laps()
-        self._draw_traces()
-        self._draw_map()
-        self._draw_gg()
-        self._fill_corners()
-        self._load_video()
-        self.set_cursor(self.cursor_d)
-
-    # ============================================================= traces ===
-    def _draw_traces(self):
-        for p, cur in zip(self.plots, self.cursors):
-            p.clear()
-            p.addItem(cur, ignoreBounds=True)
-        a = self.a
-        if a.ref is None:
-            return
-        x = self._x(a.grid)
-        unit = "mph" if self.use_mph else "km/h"
-        self.p_speed.setLabel("left", f"Speed ({unit})")
-        self.p_grip.setLabel("bottom", f"Distance ({self._dist_unit()})")
-        # corner bands, shaded every other one, named on the speed trace
-        for c in a.corners:
-            if c.n % 2 == 0:
-                for p in self.plots:
-                    band = pg.LinearRegionItem(values=(self._x(c.start_d), self._x(c.end_d)),
-                                               movable=False,
-                                               brush=pg.mkBrush(255, 255, 255, 12),
-                                               pen=pg.mkPen(None))
-                    band.setZValue(-10)
-                    p.addItem(band, ignoreBounds=True)
-        rp = pg.mkPen(REF_COLOR, width=1.6)
-        if self.p_delta.legend is None:
-            self.p_delta.addLegend(offset=(8, 4), labelTextColor="#d8d7d0",
-                                   brush=pg.mkBrush(20, 20, 20, 200))
-        self.p_delta.legend.clear()
-        self.p_delta.plot([0, float(x[-1])], [0, 0], pen=rp,
-                          name=f"Ref: {self._name(a.ref)}")
-        self.p_speed.plot(x, self._spd(a.channel_on_grid(a.ref, "speed")), pen=rp)
-        g = a.channel_on_grid(a.ref, "lon_g")
-        if g is not None:
-            self.p_long.plot(x, g, pen=rp)
-        self.p_grip.addLine(y=100, pen=pg.mkPen("#6b6a64", style=QtCore.Qt.DashLine))
-        u = a.grip_on_grid(a.ref)
-        if u is not None:
-            self.p_grip.plot(x, u * 100, pen=rp, connect="finite")
-        for i, key in enumerate(self.compare):
-            ld = self._lap(key)
-            if ld is None:
-                continue
-            pen = pg.mkPen(SERIES[i], width=1.6 if key == self.focus else 1.1)
-            self.p_delta.plot(x, a.delta(ld), pen=pen, name=self._name(ld))
-            self.p_speed.plot(x, self._spd(a.channel_on_grid(ld, "speed")), pen=pen)
-            g = a.channel_on_grid(ld, "lon_g")
-            if g is not None:
-                self.p_long.plot(x, g, pen=pen)
-            u = a.grip_on_grid(ld)
-            if u is not None:
-                self.p_grip.plot(x, u * 100, pen=pen, connect="finite")
-        self.p_grip.setYRange(0, 115, padding=0)
-        vr = self.p_speed.viewRange()[1]
-        for c in a.corners:
-            t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 0))
-            t.setPos(float(self._x(c.apex_d)), vr[1])
-            self.p_speed.addItem(t, ignoreBounds=True)
-        self.p_delta.setXRange(0, float(x[-1]), padding=0.01)
-
-    def _traces_clicked(self, ev):
-        if ev.button() != QtCore.Qt.LeftButton:
-            return
-        pos = ev.scenePos()
-        for p in self.plots:
-            vb = p.getViewBox()
-            if vb.sceneBoundingRect().contains(pos):
-                self.set_cursor(self._from_x(vb.mapSceneToView(pos).x()), seek=True)
-                return
-
-    # ================================================================ map ===
-    def _draw_map(self):
-        self.map.clear()
-        a = self.a
-        if a.ref is None:
-            return
-        ref = a.ref
-        self.map.plot(ref.xy[:, 0], ref.xy[:, 1], pen=pg.mkPen("#3a3a37", width=7))
-        ld = self._lap(self.focus) if self.focus else None
-        if ld is not None and ld is not a.ref:
-            # colour the reference line by where this lap gained or lost time
-            rate = np.gradient(a.delta(ld)) / analysis.STEP_M * 100  # s per 100 m
-            gx = np.interp(a.grid, a._ref_s, ref.xy[:, 0])
-            gy = np.interp(a.grid, a._ref_s, ref.xy[:, 1])
-            k = np.ones(15) / 15
-            rate = np.convolve(rate, k, "same")
-            cols = np.where(rate > 0.02, 1, np.where(rate < -0.02, -1, 0))
-            for val, col in ((1, LOSS), (-1, GAIN)):
-                m = cols == val
-                self.map.plot(gx[m], gy[m], pen=None, symbol="o", symbolSize=4,
-                              symbolPen=None, symbolBrush=pg.mkBrush(col))
-        else:
-            self.map.plot(ref.xy[:, 0], ref.xy[:, 1], pen=pg.mkPen(REF_COLOR, width=2))
-        for c in a.corners:
-            px = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 0]))
-            py = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 1]))
-            t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 1.2))
-            t.setPos(px, py)
-            self.map.addItem(t)
-        sx, sy = ref.xy[0]
-        self.map.plot([sx], [sy], pen=None, symbol="s", symbolSize=9,
-                      symbolBrush=pg.mkBrush("#f2f1ec"))
-        col = SERIES[self.compare.index(self.focus)] \
-            if self.focus in self.compare else REF_COLOR
-        self.marker = self.map.plot([sx], [sy], pen=None, symbol="o", symbolSize=13,
-                                    symbolPen=pg.mkPen("#0b0b0b", width=2),
-                                    symbolBrush=pg.mkBrush(col))
-
-    # ================================================================ g-g ===
-    def _draw_gg(self):
-        self.gg.clear()
-        self.gg_marker = None
-        a = self.a
-        if a.ref is None:
-            return
-        grid_pen = pg.mkPen("#3a3a37", width=1)
-        th = np.linspace(0, 2 * np.pi, 121)
-        for r in (0.5, 1.0, 1.5):
-            self.gg.plot(r * np.cos(th), r * np.sin(th), pen=grid_pen)
-            lbl = pg.TextItem(f"{r:g} g", color="#6b6a64", anchor=(0, 1))
-            lbl.setPos(r * 0.71, r * 0.71)
-            self.gg.addItem(lbl)
-        self.gg.plot([-1.6, 1.6], [0, 0], pen=grid_pen)
-        self.gg.plot([0, 0], [-1.6, 1.6], pen=grid_pen)
-        for txt, x, y, anc in (("Braking", 0, -1.55, (0.5, 0)), ("Accel", 0, 1.55, (0.5, 1)),
-                               ("Left", -1.55, 0, (0, 1)), ("Right", 1.55, 0, (1, 1))):
-            t = pg.TextItem(txt, color="#8a8983", anchor=anc)
-            t.setPos(x, y)
-            self.gg.addItem(t)
-        if a.envelope is not None:
-            o = a.envelope.outline()
-            self.gg.plot(o[:, 0], o[:, 1], pen=pg.mkPen(REF_COLOR, width=2,
-                                                        style=QtCore.Qt.DashLine))
-        ld = self._lap(self.focus) if self.focus else a.ref
-        c = next((c for c in a.corners if c.n == self.gg_turn), None)
-        for lap, col, size in ((a.ref, REF_COLOR, 3),
-                               (ld if ld is not a.ref else None, None, 4)):
-            if lap is None or lap.lat_g is None or lap.lon_g is None:
-                continue
-            col = col or (SERIES[self.compare.index(lap.key)]
-                          if lap.key in self.compare else SERIES[0])
-            fast = lap.v > 30
-            if c is None:
-                sel = fast
-                alpha = 70 if lap is a.ref and ld is not a.ref else 170
-                self.gg.plot(lap.lat_g[sel], lap.lon_g[sel], pen=None, symbol="o",
-                             symbolSize=size, symbolPen=None,
-                             symbolBrush=pg.mkBrush(QtGui.QColor(col).red(),
-                                                    QtGui.QColor(col).green(),
-                                                    QtGui.QColor(col).blue(), alpha))
-            else:
-                inside = fast & (lap.d >= c.start_d) & (lap.d <= c.end_d)
-                self.gg.plot(lap.lat_g[fast & ~inside], lap.lon_g[fast & ~inside], pen=None,
-                             symbol="o", symbolSize=3, symbolPen=None,
-                             symbolBrush=pg.mkBrush(120, 120, 115, 40))
-                self.gg.plot(lap.lat_g[inside], lap.lon_g[inside],
-                             pen=pg.mkPen(col, width=1.2), symbol="o", symbolSize=size + 2,
-                             symbolPen=None, symbolBrush=pg.mkBrush(col))
-        if c is not None:
-            t = pg.TextItem(f"{c.name}: this lap vs reference (grey)", color="#d8d7d0",
-                            anchor=(0, 0))
-            t.setPos(-1.6, 1.6)
-            self.gg.addItem(t)
-        self.gg_marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=13,
-                                      symbolPen=pg.mkPen("#0b0b0b", width=2),
-                                      symbolBrush=pg.mkBrush(CURSOR))
-        self.gg.setRange(xRange=(-1.6, 1.6), yRange=(-1.6, 1.6), padding=0.02)
-
-    def _map_clicked(self, ev):
-        a = self.a
-        if a.ref is None or ev.button() != QtCore.Qt.LeftButton:
-            return
-        vb = self.map.getViewBox()
-        p = vb.mapSceneToView(ev.scenePos())
-        d2 = (a.ref.xy[:, 0] - p.x()) ** 2 + (a.ref.xy[:, 1] - p.y()) ** 2
-        i = int(np.argmin(d2))
-        self.set_cursor(float(a._ref_s[i]), seek=True)
-
-    # ============================================================ corners ===
-    def _fill_corners(self):
-        t = self.corner_tbl
-        t.setRowCount(0)
-        ld = self._lap(self.focus) if self.focus else None
-        a = self.a
-        u = self._dist_unit()
-        su = "mph" if self.use_mph else "km/h"
-        t.setHorizontalHeaderLabels(["Corner", "Time vs ref", "Grip used", f"Min speed ({su})",
-                                     f"Braked ({u} vs ref)", "Best anyone"])
-        if ld is None or a.ref is None:
-            self.corner_lbl.setText("")
-            return
-        if ld is a.ref:
-            self.corner_lbl.setText("Pick a lap other than the reference to see "
-                                    "where it gained or lost time.")
-            return
-        res = sorted(a.corner_results(ld), key=lambda r: -r.lost)
-        total = ld.time - a.ref.time
-        self.corner_lbl.setText(
-            f"<b>{self._name(ld)}</b> vs reference: {fmt_gap(total)} s. "
-            + (f"Turns from the {self.a.profile.name} map; "
-               if self.a.profile is not None and self.a.profile.turns else
-               "Corners found from speed (C1 = first after the line; Track turns… "
-               "names them like the track map); ")
-            + "each owns the track up to the next one.")
-        t.setRowCount(len(res))
-        for r, cr in enumerate(res):
-            c = cr.corner
-            lr = c.name + (f" ({c.direction})" if c.direction else "")
-            if cr.brake_d is not None and cr.brake_d_ref is not None:
-                diff = self._x(cr.brake_d - cr.brake_d_ref)
-                brake = (f"{abs(diff):.0f} later" if diff > 0 else
-                         f"{abs(diff):.0f} earlier" if diff < 0 else "same")
-            else:
-                brake = "no hard braking"
-            g = cr.grip
-            gtxt = (f"{g.used * 100:.0f}% / {g.used_ref * 100:.0f}%"
-                    if g is not None and g.used is not None and g.used_ref is not None else "")
-            cells = [lr, fmt_gap(cr.lost), gtxt,
-                     f"{self._spd(cr.vmin):.0f} / {self._spd(cr.vmin_ref):.0f}",
-                     brake, fmt_gap(cr.best_lost)]
-            for col, txt in enumerate(cells):
-                it = QtWidgets.QTableWidgetItem(txt)
-                it.setData(QtCore.Qt.UserRole, c.n)
-                if col == 1:
-                    it.setForeground(QtGui.QColor(LOSS if cr.lost > 0.05 else
-                                                  GAIN if cr.lost < -0.05 else NEUTRAL))
-                if col == 2 and g is not None and g.used is not None and g.used_ref is not None:
-                    it.setForeground(QtGui.QColor(LOSS if g.used < g.used_ref - 0.05 else
-                                                  GAIN if g.used > g.used_ref + 0.05 else NEUTRAL))
-                    it.setToolTip(f"Grip used while cornering/braking: this lap "
-                                  f"{g.used:.0%}, reference {g.used_ref:.0%}. Peak "
-                                  f"{g.peak_g:.2f} g vs {g.peak_g_ref:.2f} g; below 80% "
-                                  f"for {g.soft_s:.1f} s vs {g.soft_s_ref:.1f} s.")
-                if col > 0:
-                    it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                t.setItem(r, col, it)
-        t.resizeColumnsToContents()
-
-    def _corner_clicked(self, row, _col):
-        it = self.corner_tbl.item(row, 0)
-        if it is None:
-            return
-        n = it.data(QtCore.Qt.UserRole)
-        c = next((c for c in self.a.corners if c.n == n), None)
-        if c is None:
-            return
-        # clicking the turn already shown on the g-g goes back to the whole lap
-        self.gg_turn = None if self.gg_turn == n else n
-        self._draw_gg()
-        if self.gg_turn is None:
-            self.p_delta.setXRange(0, float(self._x(self.a.length)), padding=0.01)
-            return
-        # land on the approach so the video shows the braking zone
-        start = max(c.start_d, c.apex_d - 250.0)
-        self.set_cursor(start, seek=True)
-        for p in self.plots[:1]:
-            p.setXRange(float(self._x(c.start_d)), float(self._x(c.end_d)), padding=0.02)
-
-    # ============================================================= cursor ===
-    def set_cursor(self, d: float, seek: bool = False):
-        a = self.a
-        if a.ref is None:
-            return
-        d = float(np.clip(d, 0.0, a.length))
-        self.cursor_d = d
-        x = float(self._x(d))
-        for ln in self.cursors:
-            ln.blockSignals(True)
-            ln.setValue(x)
-            ln.blockSignals(False)
-        ld = self._lap(self.focus) if self.focus else a.ref
+    def remove_session(self):
+        ld = self.focus_lap()
         if ld is None:
             return
-        # the marker sits where the followed lap actually was at this point
-        k = int(np.searchsorted(ld.d, d))
-        k = min(k, len(ld.xy) - 1)
-        if hasattr(self, "marker"):
-            self.marker.setData([ld.xy[k, 0]], [ld.xy[k, 1]])
-        if getattr(self, "gg_marker", None) is not None and ld.lat_g is not None \
-                and ld.lon_g is not None:
-            self.gg_marker.setData([float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
-                                   [float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
-        t_into = a.time_at(ld, d)
-        spd = self._spd(np.interp(d, a.grid, a.channel_on_grid(ld, "speed")))
-        dl = float(np.interp(d, a.grid, a.delta(ld))) if ld is not a.ref else 0.0
-        self.video_lbl.setText(
-            f"{self._name(ld)} · at {fmt_lap(t_into)} · {spd:.0f} "
-            f"{'mph' if self.use_mph else 'km/h'} · {fmt_gap(dl)} s vs ref")
-        if seek:
-            self._seek_lap(ld, t_into)
-
-    # ============================================================== video ===
-    def _load_video(self):
-        ld = self._lap(self.focus) if self.focus else None
-        si = ld.session if ld is not None else None
-        if si == self._video_session:
-            return
-        self._video_session = si
-        s = self.a.sessions[si] if si is not None else None
-        if s is None or not s.video:
-            self._duration = 0.0
-            try:
-                self.player.command("stop")
-            except Exception:
-                pass
-            if s is not None:
-                self.video_lbl.setText("No synced video for this session. Sync it in "
-                                       "Race Overlay first (Import or Auto-sync).")
-            return
-        parts, _off = s.video
-        try:
-            self._duration = media.probe(parts).duration
-        except Exception:
-            self._duration = 0.0
-        self.video.load(media.mpv_url(parts))
-        QtCore.QTimer.singleShot(400, lambda: self.set_cursor(self.cursor_d, seek=True))
-
-    def _session_video(self, ld):
         s = self.a.sessions[ld.session]
-        return s.video if s.video and ld.session == self._video_session else None
+        r = QtWidgets.QMessageBox.question(self, "Remove session",
+                                           f"Remove {s.name} from this analysis? "
+                                           "(Nothing is deleted from disk.)")
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        self.a.remove(ld.session)
+        self.compare, self.focus = [], None
+        self._video_session = None
+        if self.a.sessions:
+            self._default_selection()
+        self.refresh()
 
-    def _seek_lap(self, ld, t_into: float):
-        v = self._session_video(ld)
-        if not v:
+    def edit_turns(self):
+        if self.a.ref is None:
             return
-        vt = ld.lap.start + t_into - v[1]
-        if self._duration and not (0 <= vt <= self._duration):
-            self.video_lbl.setText(self.video_lbl.text() + "  (not in the video)")
-            return
-        try:
-            self.player.command("seek", f"{max(0.0, vt):.3f}", "absolute+exact")
-            self._vt = vt
-        except Exception:
-            pass
+        from .turns import TurnsDialog
+        dlg = TurnsDialog(self, self.a, self.a.profile)
+        if dlg.exec():
+            self.a.use_profile(dlg.profile)
+            self.refresh()
 
-    def _toggle_play(self):
-        try:
-            self.player.pause = not self.player.pause
-        except Exception:
-            pass
+    # ------------------------------------------------------- find video ---
+    def find_video(self):
+        ld = self.focus_lap()
+        if ld is None or self._sync_job is not None:
+            return
+        si = ld.session
+        s = self.a.sessions[si]
+        p = pick_file(self, f"GoPro video for {s.name}", "video",
+                      "Video (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
+        if not p:
+            return
+        parts = media.find_chapters(p)
+        tel = s.tel
+        job = {"si": si, "parts": parts, "done": False, "res": None, "err": None}
+        self._sync_job = job
+        self.status(f"Syncing {Path(p).name} to {s.name} from the camera's sensors…", 0)
 
-    def _step(self, dt: float):
-        try:
-            self.player.command("seek", f"{dt:.3f}", "relative+exact")
-        except Exception:
-            pass
+        def work():
+            try:
+                info = media.probe(parts)
+                res, *_ = gosync.sync_parts([(x.path, x.start) for x in info.parts], tel)
+                job["res"] = res
+            except gosync.NoCameraData:
+                job["err"] = ("This video has no GoPro sensor track (merged or re-encoded "
+                              "files lose it). Pick the original GH01xxxx file.")
+            except Exception as e:  # noqa: BLE001
+                job["err"] = str(e)
+            job["done"] = True
+        threading.Thread(target=work, daemon=True).start()
 
-    def _tick(self):
-        """While the video plays, move the cursor with it."""
-        if self._sync_job is not None and self._sync_job["done"]:
-            self._finish_find_video()
-        ld = self._lap(self.focus) if self.focus else None
-        if ld is None:
+    def _finish_find_video(self):
+        job, self._sync_job = self._sync_job, None
+        self.statusBar().clearMessage()
+        if job["err"]:
+            QtWidgets.QMessageBox.warning(self, "Couldn't sync", job["err"])
             return
-        try:
-            paused = bool(self.player.pause)
-            vt = self.player.time_pos
-        except Exception:
-            return
-        self.btn_play.setText("Play" if paused else "Pause")
-        v = self._session_video(ld)
-        if vt is None or not v:
-            return
-        # follow the video while it plays, plus once more after it pauses or
-        # steps, so the cursor ends on the frame that's showing
-        if paused and abs(float(vt) - self._vt) < 1e-3:
-            return
-        self._vt = float(vt)
-        t_into = float(vt) + v[1] - ld.lap.start
-        if 0 <= t_into <= ld.time:
-            self.set_cursor(self.a.dist_at(ld, t_into))
+        res = job["res"]
+        if not res.confident:
+            r = QtWidgets.QMessageBox.question(
+                self, "Weak match",
+                f"The best match is weak ({res.score:.0%}, next best {res.runner_up:.0%}). "
+                f"The video may be from another session.\n\nUse it anyway "
+                f"(offset {res.offset:+.2f} s)?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+        s = self.a.sessions[job["si"]]
+        s.video = (job["parts"], res.offset)
+        ingest.save_pairing(job["parts"], s.path, res.offset)
+        self._video_session = None
+        self.refresh()
+        self.status(f"Video synced to {s.name} (offset {res.offset:+.2f} s).")
 
     def closeEvent(self, ev):
+        self._closing = True
         self.timer.stop()
-        try:
-            self.video.shutdown()
-        except Exception:
-            pass
+        for w in list(self._popouts.values()):
+            w.close()
+        self.videop.shutdown()
         super().closeEvent(ev)
 
 
-def open_window(sessions: list[tuple[str, object, tuple | None]], parent=None) -> AnalysisWindow:
-    """Open an analysis window with (csv path, Telemetry or None, video or None)
-    sessions already loaded. Used by Race Overlay's "Analyze laps…"."""
+def open_window(sessions, parent=None) -> AnalysisWindow:
+    """Open a window with (csv path, Telemetry or None, video or None) loaded."""
     win = AnalysisWindow(parent)
     win.show()
     for path, tel, video in sessions:
@@ -947,8 +651,7 @@ def open_window(sessions: list[tuple[str, object, tuple | None]], parent=None) -
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="raceanalysis",
-                                 description="Compare laps and sessions.")
+    ap = argparse.ArgumentParser(prog="raceanalysis", description="Compare laps and sessions.")
     ap.add_argument("csv", nargs="*", help="Data files from the same track")
     args = ap.parse_args(argv)
     fmt = QtGui.QSurfaceFormat()
@@ -971,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     locale.setlocale(locale.LC_NUMERIC, "C")  # libmpv refuses other locales
     win = AnalysisWindow()
     win.show()
+    win.restore_popouts()
     for p in args.csv:
         if os.path.exists(p):
             win.add_session(p)
