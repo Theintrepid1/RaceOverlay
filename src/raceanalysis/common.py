@@ -11,6 +11,7 @@ from racecore import ingest
 SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500"]
 REF_COLOR = "#b5b4ad"
 GAIN, LOSS, NEUTRAL = "#199e70", "#e66767", "#6b6a64"
+LIMIT = "#4fb3bf"   # the grip envelope (dashed), not a lap colour
 PURPLE = "#b38cff"
 CURSOR = "#f2f1ec"
 INK, INK_DIM, INK_FAINT = "#ecebe6", "#a8a79f", "#6b6a64"

@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from raceoverlay.syncgui import _note, settings
 
-from ..common import CURSOR, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
+from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
 
 
 class CornersPage(QtWidgets.QWidget):
@@ -50,6 +50,15 @@ class CornersPage(QtWidgets.QWidget):
         self.loop.setChecked(settings().value("analysis/corner_loop", True, type=bool))
         self.loop.toggled.connect(self._loop_toggled)
         row.addWidget(self.loop)
+        row.addSpacing(16)
+        self.felt = QtWidgets.QCheckBox("G as felt in the car")
+        self.felt.setToolTip("Off: the dot moves the way the car accelerates (braking down, "
+                             "a right turn to the right).\nOn: the dot moves the way you're "
+                             "pushed in the seat (braking up, a right turn to the left), "
+                             "like a ball on the dash.")
+        self.felt.setChecked(settings().value("analysis/gg_felt", False, type=bool))
+        self.felt.toggled.connect(self._felt_toggled)
+        row.addWidget(self.felt)
         row.addStretch(1)
         self.btn_all = QtWidgets.QPushButton("Whole lap")
         self.btn_all.setToolTip("Clear the picked turns")
@@ -71,8 +80,6 @@ class CornersPage(QtWidgets.QWidget):
         self.gg.setMenuEnabled(False)
         for ax in ("left", "bottom"):
             self.gg.getAxis(ax).enableAutoSIPrefix(False)
-        self.gg.setLabel("bottom", "Lateral g (right +)")
-        self.gg.setLabel("left", "Brake – / accel + (g)")
         split.addWidget(self.gg)
         split.setSizes([560, 460])
         lay.addWidget(split)
@@ -97,8 +104,9 @@ class CornersPage(QtWidgets.QWidget):
         ld = w.focus_lap()
         if self.marker is None or ld is None or ld.lat_g is None or ld.lon_g is None:
             return
-        self.marker.setData([float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
-                            [float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
+        k = self._k()
+        self.marker.setData([k * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lat_g")))],
+                            [k * float(np.interp(d, a.grid, a.channel_on_grid(ld, "lon_g")))])
 
     def ref_cursor(self, rd: float | None):
         """Where the reference video is (None: no reference video showing)."""
@@ -109,8 +117,17 @@ class CornersPage(QtWidgets.QWidget):
         if rd is None or ref is None or ref.lat_g is None or ref.lon_g is None:
             self.ref_marker.setData([], [])
             return
-        self.ref_marker.setData([float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
-                                [float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
+        k = self._k()
+        self.ref_marker.setData([k * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lat_g")))],
+                                [k * float(np.interp(rd, a.grid, a.channel_on_grid(ref, "lon_g")))])
+
+    def _k(self) -> float:
+        """+1: car's acceleration; -1: as felt in the seat (both axes flip)."""
+        return -1.0 if self.felt.isChecked() else 1.0
+
+    def _felt_toggled(self, on: bool):
+        settings().setValue("analysis/gg_felt", on)
+        self._draw_gg()
 
     def show_turn(self, n: int):
         """Pick turn n (from the Overview's biggest losses)."""
@@ -294,15 +311,28 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.addItem(lbl)
         self.gg.plot([-1.6, 1.6], [0, 0], pen=grid_pen)
         self.gg.plot([0, 0], [-1.6, 1.6], pen=grid_pen)
-        for txt, x, y, anc in (("Braking", 0, -1.55, (0.5, 0)), ("Accel", 0, 1.55, (0.5, 1)),
-                               ("Left", -1.55, 0, (0, 1)), ("Right", 1.55, 0, (1, 1))):
+        k = self._k()
+        felt = k < 0
+        self.gg.setLabel("bottom", "Pushed sideways (g)" if felt else "Lateral g (right turn +)")
+        self.gg.setLabel("left", "Pushed forward + / back – (g)" if felt
+                         else "Brake – / accel + (g)")
+        for txt, x, y, anc in (("Braking", 0, -1.55 * k, (0.5, 0 if not felt else 1)),
+                               ("Accel", 0, 1.55 * k, (0.5, 1 if not felt else 0)),
+                               ("Left turn", -1.55 * k, 0, (0 if not felt else 1, 1)),
+                               ("Right turn", 1.55 * k, 0, (1 if not felt else 0, 1))):
             t = pg.TextItem(txt, color="#8a8983", anchor=anc)
             t.setPos(x, y)
             self.gg.addItem(t)
         if a.envelope is not None:
             o = a.envelope.outline()
-            self.gg.plot(o[:, 0], o[:, 1], pen=pg.mkPen(REF_COLOR, width=2,
+            self.gg.plot(k * o[:, 0], k * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
                                                         style=QtCore.Qt.DashLine))
+            # label it on the cornering side, so it isn't taken for a lap
+            th = np.deg2rad(20)
+            r = float(a.envelope.at(th))
+            lbl = pg.TextItem("your limit", color=LIMIT, anchor=(0 if k > 0 else 1, 0.5))
+            lbl.setPos(k * (r * np.cos(th) + 0.04), k * r * np.sin(th))
+            self.gg.addItem(lbl)
         ld = w.focus_lap() or a.ref
         cs, span = self._picked()
         for lap, col, size in ((a.ref, REF_COLOR, 3), (ld if ld is not a.ref else None, None, 4)):
@@ -313,12 +343,13 @@ class CornersPage(QtWidgets.QWidget):
             fast = lap.v > 30
             if span is None:
                 alpha = 70 if lap is a.ref and ld is not a.ref else 170
-                self.gg.plot(lap.lat_g[fast], lap.lon_g[fast], pen=None, symbol="o",
+                self.gg.plot(k * lap.lat_g[fast], k * lap.lon_g[fast], pen=None, symbol="o",
                              symbolSize=size, symbolPen=None,
                              symbolBrush=pg.mkBrush(q.red(), q.green(), q.blue(), alpha))
             else:
                 inside = fast & (lap.d >= span[0]) & (lap.d <= span[1])
-                self.gg.plot(lap.lat_g[inside], lap.lon_g[inside], pen=pg.mkPen(col, width=1.2),
+                self.gg.plot(k * lap.lat_g[inside], k * lap.lon_g[inside],
+                             pen=pg.mkPen(col, width=1.2),
                              symbol="o", symbolSize=size + 2, symbolPen=None,
                              symbolBrush=pg.mkBrush(col))
         if cs:
