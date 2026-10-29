@@ -70,6 +70,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._popouts: dict[str, PopOut] = {}
         self._pending = False
         self._loop: tuple[float, float] | None = None   # metres along the reference
+        self._ref_session: int | None = None   # session loaded in the reference player
+        self._ref_duration = 0.0
+        self._ref_anchor: tuple[float, float] | None = None   # (your video t, ref video t)
+        self._ref_i = 0.0
         avail = QtGui.QGuiApplication.primaryScreen().availableGeometry()
         self.resize(min(1680, int(avail.width() * 0.96)),
                     min(1040, int(avail.height() * 0.94)))
@@ -144,6 +148,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.split.addWidget(self.tabs)
         self.videop = VideoPanel()
         self.player = self.videop.player
+        self.videop.compare_changed.connect(self._ref_toggled)
+        self.videop.mode_changed.connect(self._ref_mode)
+        i = self.videop.mode.findData(settings().value("analysis/refmode", "spot"))
+        self.videop.mode.setCurrentIndex(max(0, i))
         self.split.addWidget(self.videop)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
@@ -154,6 +162,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             lambda *_: settings().setValue("analysis/split", self.split.saveState()))
         cl.addWidget(self.split, 1)
         self.setCentralWidget(central)
+        self.videop.chk_ref.setChecked(settings().value("analysis/refvideo", False, type=bool))
         self.tabs.setCurrentIndex(int(settings().value("analysis/tab", 0)))
         self._tab_changed(self.tabs.currentIndex())
 
@@ -280,6 +289,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             p.refresh()
         self._info()
         self._load_video()
+        self._load_ref_video()
         self.set_cursor(self.cursor_d)
         has = self.a.ref is not None
         for act in (self.act_find, self.act_remove, self.act_turns):
@@ -290,6 +300,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         for p in self.pages:
             p.laps_changed()
         self._load_video()
+        self._load_ref_video()
         self._apply_ab()
         self.set_cursor(self.cursor_d)
 
@@ -478,6 +489,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return False
         self.videop.seek(vt)
         self._vt = vt
+        self._ref_anchor = None
         return True
 
     def _tick(self):
@@ -488,6 +500,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         paused, vt = self.videop.state()
         self.videop.btn_play.setText("Play" if paused else "Pause")
+        self._follow_video(ld, paused, vt)
+        self._follow_ref(ld, paused, vt)
+
+    def _follow_video(self, ld, paused, vt):
         v = self._session_video(ld)
         if vt is None or not v:
             return
@@ -495,10 +511,117 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         # steps, so the cursor ends on the frame that's showing
         if paused and abs(float(vt) - self._vt) < 1e-3:
             return
+        if float(vt) < self._vt - 0.5:     # jumped back (loop, step): re-sync the ghost
+            self._ref_anchor = None
         self._vt = float(vt)
         t_into = float(vt) + v[1] - ld.lap.start
         if 0 <= t_into <= ld.time:
             self.set_cursor(self.a.dist_at(ld, t_into))
+
+    # ==================================================== reference video ===
+    def _ref_toggled(self, on: bool):
+        settings().setValue("analysis/refvideo", on)
+        self._ref_session = None
+        self._ref_anchor = None
+        if on:
+            self._load_ref_video()
+
+    def _ref_mode(self, mode: str):
+        settings().setValue("analysis/refmode", mode)
+        self._ref_anchor = None
+
+    def _load_ref_video(self):
+        vp = self.videop
+        if not vp.compare:
+            return
+        ref = self.a.ref
+        if ref is None:
+            vp.set_ref_note("")
+            return
+        s = self.a.sessions[ref.session]
+        if not s.video:
+            self._ref_session = None
+            vp.ref_stop()
+            vp.set_ref_note(f"No synced video for {s.name} (the reference lap's session).")
+            return
+        if self._ref_session == ref.session:
+            return
+        self._ref_session = ref.session
+        self._ref_anchor = None
+        parts, _off = s.video
+        try:
+            self._ref_duration = media.probe(parts).duration
+        except Exception:
+            self._ref_duration = 0.0
+        vp.ref_load(media.mpv_url(parts))
+
+    def _follow_ref(self, ld, paused, vt):
+        """Keep the reference video in step with yours: at the same place on
+        track, or (ghost) the same time since the last seek or loop start."""
+        vp, a = self.videop, self.a
+        ref = a.ref
+        if not vp.compare or ref is None or vp.ref_video is None:
+            return
+        if self._ref_session is None or self._ref_session != ref.session:
+            return
+        rs = a.sessions[ref.session]
+        roff = rs.video[1]
+        if ld is ref:
+            vp.ref_pause()
+            vp.set_ref_note("This is the reference lap. Pick another lap to compare.")
+            return
+        d = self.cursor_d
+        spot = ref.lap.start + a.time_at(ref, d) - roff
+        mine = self._session_video(ld)
+        if vp.mode.currentData() == "clock" and mine and vt is not None:
+            if self._ref_anchor is None:
+                self._ref_anchor = (float(vt), spot)
+            target = self._ref_anchor[1] + (float(vt) - self._ref_anchor[0])
+        else:
+            target = spot
+        r_into = target + roff - ref.lap.start
+        if not (0 <= target <= (self._ref_duration or 1e9)) or not (-5 <= r_into <= ref.time + 5):
+            vp.ref_pause()
+            vp.set_ref_note("The reference lap isn't in its video here.")
+            return
+        vp.set_ref_note("")
+        r_paused, rt = vp.ref_state()
+        if rt is None:
+            return
+        if paused or not mine:
+            vp.ref_pause()
+            if abs(rt - target) > 0.03:
+                vp.ref_seek(target)
+        else:
+            err = target - float(rt)
+            if abs(err) > 0.6:
+                vp.ref_seek(target)
+                vp.ref_play(1.0)
+                self._ref_i = 0.0
+            else:
+                # PI control on playback speed: the integral takes out the
+                # steady lag from mpv's own latency
+                self._ref_i = float(np.clip(self._ref_i + err * 0.05, -0.5, 0.5))
+                ff = 1.0
+                if vp.mode.currentData() != "clock":
+                    # the reference covers this stretch at its own speed
+                    vm = np.interp(d, a.grid, a.channel_on_grid(ld, "speed"))
+                    vr = np.interp(d, a.grid, a.channel_on_grid(ref, "speed"))
+                    ff = float(np.clip(vm / max(vr, 5.0), 0.5, 2.0))
+                adj = np.clip(2.0 * err + 1.5 * self._ref_i, -0.4, 0.4)
+                vp.ref_play(float(np.clip(ff * (1 + adj), 0.4, 2.5)))
+        # readout for the reference
+        r_into = float(np.clip(r_into, 0, ref.time))
+        rd = a.dist_at(ref, r_into)
+        rspd = float(self.spd(np.interp(rd, a.grid, a.channel_on_grid(ref, "speed"))))
+        gap = None
+        if vp.mode.currentData() == "clock":
+            g = float(self.x(rd - d))
+            gap = ("AHEAD" if g >= 0 else "BEHIND", f"{abs(g):.0f}", self.dist_unit())
+        else:
+            gap = ("VS YOU", f"{-float(np.interp(d, a.grid, a.delta(ld))):+.2f}", "s")
+        vp.ref_strip.show_values(f"{ref.lap.n}", fmt_lap(r_into, 1), f"{rspd:.0f}",
+                                 self.speed_unit(), None, gap=gap)
 
     # ========================================================== sessions ===
     def add_session(self, path: str, tel=None, video=None, quiet=False,

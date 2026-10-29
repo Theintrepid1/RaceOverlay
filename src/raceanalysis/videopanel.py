@@ -80,7 +80,7 @@ class ReadoutStrip(QtWidgets.QFrame):
         self.lap = _Readout("LAP", template="88")
         self.time = _Readout("LAP TIME", template="8:88.8")
         self.speed = _Readout("SPEED", "mph", template="188")
-        self.delta = _Readout("VS REF", "s", template="+88.88")
+        self.delta = _Readout("VS REF", "s", template="+888.8")
         self.gear = _Readout("GEAR", template="8")
         self.rpm = _Readout("RPM", template="8,888")
         self.items = [self.lap, self.time, self.speed, self.delta, self.gear, self.rpm]
@@ -119,16 +119,26 @@ class ReadoutStrip(QtWidgets.QFrame):
         return int(px * 1.25) + 16 + (18 if self.note.text() else 0) + 8
 
     def show_values(self, lap: str, time: str, speed: str, unit: str, delta: float | None,
-                    gear: str | None = None, rpm: str | None = None, note: str = ""):
+                    gear: str | None = None, rpm: str | None = None, note: str = "",
+                    gap: tuple[str, str, str] | None = None):
+        """gap = (title, value, unit) replaces the VS REF readout (the
+        reference video's strip shows how far ahead or behind it is)."""
         self.lap.value.setText(lap)
         self.time.value.setText(time)
         self.speed.value.setText(speed)
         self.speed.unit.setText(unit)
-        if delta is None:
+        if gap is not None:
+            self.delta.title.setText(gap[0])
+            self.delta.value.setText(gap[1])
+            self.delta.unit.setText(gap[2])
+            self.delta.value.setStyleSheet(f"color:{INK};")
+        elif delta is None:
+            self.delta.title.setText("VS REF")
             self.delta.value.setText("ref")
             self.delta.value.setStyleSheet(f"color:{INK_DIM};")
             self.delta.unit.setText("")
         else:
+            self.delta.title.setText("VS REF")
             self.delta.value.setText(f"{delta:+.2f}")
             col = LOSS if delta > 0.05 else GAIN if delta < -0.05 else INK
             self.delta.value.setStyleSheet(f"color:{col};")
@@ -148,12 +158,17 @@ class ReadoutStrip(QtWidgets.QFrame):
 
 class VideoPanel(QtWidgets.QWidget):
     """Video at its own aspect ratio, readout strip in the leftover band,
-    play controls at the bottom."""
+    play controls at the bottom. With "Reference video" on, the reference
+    lap's video sits under it with its own strip."""
+    compare_changed = QtCore.Signal(bool)
+    mode_changed = QtCore.Signal(str)
+    MODES = [("Same spot", "spot"), ("Ghost", "clock")]
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        native = (preview_mode() == "native"
-                  and QtGui.QGuiApplication.platformName() == "xcb")
+        self._native = (preview_mode() == "native"
+                        and QtGui.QGuiApplication.platformName() == "xcb")
+        native = self._native
         self.video = MpvNativeWidget(self) if native else MpvWidget(self)
         self.video.setMinimumSize(160, 90)
         self.player = self.video.player
@@ -169,6 +184,32 @@ class VideoPanel(QtWidgets.QWidget):
         for w in (self.btn_back, self.btn_play, self.btn_fwd):
             cl.addWidget(w)
         cl.addWidget(self.status, 1)
+        self.chk_ref = QtWidgets.QCheckBox("Ref video")
+        self.chk_ref.setStyleSheet(f"color:{INK};")
+        self.chk_ref.setToolTip("Show the reference lap's video under this one, kept in step")
+        self.chk_ref.toggled.connect(self._compare_toggled)
+        cl.addWidget(self.chk_ref)
+        self.mode = QtWidgets.QComboBox()
+        for txt, key in self.MODES:
+            self.mode.addItem(txt, key)
+        self.mode.setToolTip("Same spot: the reference video is held at the same place on "
+                             "track as yours.\nGhost: both run in real time from the same "
+                             "start, so you see the faster lap pull away.")
+        self.mode.currentIndexChanged.connect(
+            lambda _i: self.mode_changed.emit(self.mode.currentData()))
+        self.mode.setVisible(False)
+        cl.addWidget(self.mode)
+        # reference video, made the first time it's wanted
+        self.ref_video = None
+        self.ref_strip = ReadoutStrip(self)
+        self.ref_strip.lap.title.setText("REF LAP")
+        self.ref_strip.hide()
+        self.ref_note = QtWidgets.QLabel("", self)
+        self.ref_note.setAlignment(QtCore.Qt.AlignCenter)
+        self.ref_note.setWordWrap(True)
+        self.ref_note.setStyleSheet(f"color:{INK_DIM}; background:#000;")
+        self.ref_note.hide()
+        self.compare = False
         self.aspect = 16 / 9
         self.setMinimumWidth(320)
         pal = self.palette()
@@ -187,12 +228,21 @@ class VideoPanel(QtWidgets.QWidget):
         super().resizeEvent(ev)
 
     def _relayout(self):
-        """Video as large as fits; the readouts in the band under it, as big
-        as that band and the width allow (the group is centred vertically)."""
         W, H = self.width(), self.height()
         ch = self.controls.sizeHint().height()
         room = max(0, H - ch)
-        st = self.strip
+        if self.compare and self.ref_video is not None:
+            half = room // 2
+            self._place(self.video, self.strip, 0, half, W)
+            self._place(self.ref_video, self.ref_strip, half, room - half, W)
+            self.ref_note.setGeometry(self.ref_video.geometry())
+        else:
+            self._place(self.video, self.strip, 0, room, W)
+        self.controls.setGeometry(0, room, W, ch)
+
+    def _place(self, video, st, y0, room, W):
+        """Video as large as fits; the readouts in the band under it, as big
+        as that band and the width allow (the group is centred vertically)."""
         px = 44
         while px > 16 and st.needed_width(px) > W:
             px -= 2
@@ -206,10 +256,82 @@ class VideoPanel(QtWidgets.QWidget):
             px -= 2
         st.set_scale(px)
         sh = min(band, st.needed_height(px) + 12)
-        top = (room - vh - sh) // 2
-        self.video.setGeometry((W - vw) // 2, top, vw, vh)
+        top = y0 + (room - vh - sh) // 2
+        video.setGeometry((W - vw) // 2, top, vw, vh)
         st.setGeometry(0, top + vh, W, sh)
-        self.controls.setGeometry(0, room, W, ch)
+
+    # ------------------------------------------------------- reference
+    def _compare_toggled(self, on: bool):
+        if on and self.ref_video is None:
+            self.ref_video = MpvNativeWidget(self) if self._native else MpvWidget(self)
+            self.ref_video.setMinimumSize(160, 90)
+            try:
+                self.ref_video.player.mute = True
+            except Exception:
+                pass
+            self.ref_note.raise_()
+        self.compare = on
+        self.mode.setVisible(on)
+        if self.ref_video is not None:
+            self.ref_video.setVisible(on)
+            if not on:
+                self.ref_pause()
+        self.ref_strip.setVisible(on)
+        if not on:
+            self.ref_note.hide()
+        self._relayout()
+        self.compare_changed.emit(on)
+
+    def set_ref_note(self, text: str):
+        """Text over the reference video (no video for that lap, etc.)."""
+        if not self.compare:
+            return
+        self.ref_note.setText(text)
+        self.ref_note.setVisible(bool(text))
+        if text:
+            self.ref_note.raise_()
+
+    def _rp(self):
+        return self.ref_video.player if self.ref_video is not None else None
+
+    def ref_load(self, url: str):
+        if self.ref_video is not None:
+            self.ref_video.load(url)
+
+    def ref_stop(self):
+        try:
+            self._rp().command("stop")
+        except Exception:
+            pass
+
+    def ref_seek(self, t: float):
+        try:
+            self._rp().command("seek", f"{max(0.0, t):.3f}", "absolute+exact")
+        except Exception:
+            pass
+
+    def ref_pause(self):
+        try:
+            self._rp().pause = True
+        except Exception:
+            pass
+
+    def ref_play(self, speed: float):
+        try:
+            p = self._rp()
+            if abs((p.speed or 1.0) - speed) > 0.01:
+                p.speed = speed
+            if p.pause:
+                p.pause = False
+        except Exception:
+            pass
+
+    def ref_state(self) -> tuple[bool, float | None]:
+        try:
+            p = self._rp()
+            return bool(p.pause), p.time_pos
+        except Exception:
+            return True, None
 
     # ------------------------------------------------------------ player
     def load(self, url: str):
@@ -273,7 +395,9 @@ class VideoPanel(QtWidgets.QWidget):
             return True, None
 
     def shutdown(self):
-        try:
-            self.video.shutdown()
-        except Exception:
-            pass
+        for v in (self.video, self.ref_video):
+            try:
+                if v is not None:
+                    v.shutdown()
+            except Exception:
+                pass
