@@ -80,7 +80,7 @@ class ReadoutStrip(QtWidgets.QFrame):
         self.lap = _Readout("LAP", template="88")
         self.time = _Readout("LAP TIME", template="8:88.8")
         self.speed = _Readout("SPEED", "mph", template="188")
-        self.delta = _Readout("VS REF", "s", template="+888.8")
+        self.delta = _Readout("VS REF", "s", template="+888.88")
         self.gear = _Readout("GEAR", template="8")
         self.rpm = _Readout("RPM", template="8,888")
         self.items = [self.lap, self.time, self.speed, self.delta, self.gear, self.rpm]
@@ -122,8 +122,12 @@ class ReadoutStrip(QtWidgets.QFrame):
         f.setPixelSize(px)
         fm = QtGui.QFontMetrics(f)
         vis = [w for w in self.items if not w.isHidden()]
-        return (sum(fm.horizontalAdvance(w.template) + 34 for w in vis)
-                + 22 * (len(vis) - 1) + 24)
+        total = 0
+        for w in vis:      # title over value + unit, as laid out
+            val = fm.horizontalAdvance(w.template) + 2
+            unit = w.unit.sizeHint().width() + 4 if w.unit.text() else 0
+            total += max(w.title.sizeHint().width(), val + unit)
+        return total + 22 * (len(vis) - 1) + 24 + 8
 
     def needed_height(self, px: int) -> int:
         return int(px * 1.25) + 16 + (18 if self.note.text() else 0) + 8

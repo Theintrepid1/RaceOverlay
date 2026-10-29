@@ -25,12 +25,13 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from racecore import analysis, gosync, ingest, telemetry, tracks
+from racecore import analysis, engine, gosync, ingest, telemetry, tracks
 from raceoverlay import media
 from raceoverlay.syncgui import pick_file, preview_mode, settings
 
 from .common import FT, INK_DIM, MAX_COMPARE, MPH, REF_COLOR, SERIES, fmt_lap, session_name
 from .pages.corners import CornersPage
+from .pages.engine import EnginePage
 from .pages.laps import LapsPage
 from .pages.overview import OverviewPage
 from .pages.track import TrackPage
@@ -60,6 +61,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Race Analysis")
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.a = analysis.Analysis()
+        self.engine = engine.EngineData(self.a)
         self.use_mph = settings().value("use_mph", True, type=bool)
         self.compare: list[tuple[int, int]] = []   # lap keys overlaid, in colour order
         self.focus: tuple[int, int] | None = None  # lap the video, readout and turns follow
@@ -162,7 +164,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
-        self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self), TrackPage(self)]
+        self.pages = [OverviewPage(self), LapsPage(self), CornersPage(self), EnginePage(self),
+                      TrackPage(self)]
         for p in self.pages:
             self.tabs.addTab(p, p.title.replace("&", "&&"))
         self.tabs.currentChanged.connect(self._tab_changed)
@@ -319,6 +322,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
     # ============================================================ refresh ===
     def refresh(self):
         """Sessions, reference or turns changed: rebuild everything."""
+        self.engine = engine.EngineData(self.a)
         self._fill_pickers()
         for p in self.pages:
             p.refresh()
@@ -466,10 +470,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         t_into = a.time_at(ld, d)
         spd = float(self.spd(np.interp(d, a.grid, a.channel_on_grid(ld, "speed"))))
         dl = None if ld is a.ref else float(np.interp(d, a.grid, a.delta(ld)))
-        gear = rpm = None
-        r = self._channel_at(ld, "rpm", d)
-        if r is not None and r > 0:
-            rpm = f"{r:,.0f}"
+        gear, rpm = self._gear_rpm(ld, t_into)
         note = ""
         v = self.a.sessions[ld.session].video
         if not v:
@@ -480,15 +481,17 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.videop.strip.show_values(f"{ld.lap.n}", fmt_lap(t_into, 1), f"{spd:.0f}",
                                       self.speed_unit(), dl, gear, rpm, note)
 
-    def _channel_at(self, ld, name, d):
-        ch = self.a.sessions[ld.session].tel.channels.get(name)
-        if ch is None:
-            return None
-        s = self.a.sessions[ld.session]
-        t = s.tel.time
-        tt = ld.lap.start + self.a.time_at(ld, d)
-        val = float(np.interp(tt, t, np.nan_to_num(ch)))
-        return val
+    def _gear_rpm(self, ld, t_into):
+        """Readout strings for the video strip (None: the data hasn't got it)."""
+        e = self.engine
+        col = e.col_of("rpm") if e else None
+        rpm = e.at(ld, col, t_into) if col else None
+        rpm = f"{rpm:,.0f}" if rpm is not None and rpm > 0 else None
+        gear = None
+        if e and e.gearing and e.gears[ld.session] is not None:
+            g = e.gear_at(ld, t_into)
+            gear = str(g) if g else "–"
+        return gear, rpm
 
     # ============================================================== video ===
     def _load_video(self):
@@ -662,8 +665,9 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         else:
             gap = ("VS YOU", f"{-float(np.interp(d, a.grid, a.delta(ld))):+.2f}", "s")
         vp.ref_strip.set_accent(REF_COLOR)
+        rgear, rrpm = self._gear_rpm(ref, r_into)
         vp.ref_strip.show_values(f"{ref.lap.n}", fmt_lap(r_into, 1), f"{rspd:.0f}",
-                                 self.speed_unit(), None, gap=gap)
+                                 self.speed_unit(), None, rgear, rrpm, gap=gap)
         self._set_ref_d(rd)
 
     # ========================================================== sessions ===
