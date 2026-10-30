@@ -1,9 +1,15 @@
 # Roadmap
 
-## Next (v0.10) — collecting ideas, not started
-- (add ideas here)
+## Next — collecting ideas, not started
+- Interpolate the start/finish crossing (laps start up to one sample late)
+- Track database stage 2: public tracks repo + "Check for track updates"
+- Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **v1.1.0** (2026-10-30): Windows (same code as Linux, per-user installer
+  built by GitHub Actions on each release, unsigned); built-in track library
+  shipped with the app (VIR Full Course), local overrides, Reset to built-in,
+  Export for sharing.
 - **v1.0.0** (2026-10-28): first release. v0.9.9 confirmed on Cam's NVIDIA
   desktop (CachyOS, KDE Wayland) and Intel laptop.
 - v0.9.9: side panel no longer clips (long filenames wrap, dropdowns don't size
@@ -48,7 +54,6 @@
 - Native AiM .xrk (libxrk), MoTeC .ld (check parser license)
 
 ## Later
-- Windows build: Linux-only bits ported, runs from source (windows/setup.bat); still to do: GitHub Actions build, installer, signing decision
 - Flatpak / Flathub if it goes public
 
 ## Shelved

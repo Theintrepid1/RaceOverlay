@@ -230,6 +230,12 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v1.1.0 — Windows and a shared track library. Windows installer (per-user,
+unsigned for now) built by GitHub Actions and attached to each release;
+Race Analysis ships with built-in tracks (VIR Full Course to start), with
+local edits, Reset to built-in and Export for sharing. Same version on Linux
+and Windows.
+
 v1.0.0 — first release. Same as v0.9.9, tested on NVIDIA (KDE Wayland) and
 Intel.
 
