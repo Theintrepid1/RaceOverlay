@@ -886,7 +886,8 @@ def main(argv: list[str] | None = None) -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["raceanalysis"])
     restore_qpa()
     app.setApplicationName("raceoverlay")  # share Race Overlay's settings
-    app.setApplicationDisplayName("Race Analysis")
+    from raceoverlay import __version__
+    app.setApplicationDisplayName(f"Race Analysis {__version__}")
     app.setDesktopFileName("raceanalysis")
     icon = Path(__file__).resolve().parent.parent / "raceoverlay" / "icon.svg"
     if icon.exists():
