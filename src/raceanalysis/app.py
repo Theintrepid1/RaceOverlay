@@ -732,12 +732,14 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         near = [p for p in tracks.load_all()
                 if float(np.hypot(*tracks.to_xy(lat, lon, p.lat0, p.lon0)[0]))
                 <= tracks.SAME_TRACK_M]
-        last = settings().value("analysis/track_last", "")
-        return next((p for p in near if p.path == last), None) or tracks.find(lat, lon)
+        # by file name, so it survives moves between local and built-in
+        # (older versions stored the full path; its stem still matches)
+        last = Path(settings().value("analysis/track_last", "") or "").stem
+        return next((p for p in near if last and p.key == last), None) or tracks.find(lat, lon)
 
     def remember_track(self, p):
         if p is not None and p.path:
-            settings().setValue("analysis/track_last", p.path)
+            settings().setValue("analysis/track_last", p.key)
 
     def import_card(self):
         from .importer import ImportDialog

@@ -3,9 +3,17 @@
 """Per-track profiles: official turn names and positions, and an optional
 track-map image lined up with the GPS trace.
 
-Stored as JSON in <data dir>/raceoverlay/tracks/, one file per track, found
-again by the start/finish line's position. A profile has its own origin
-(its start line), so it lines up with any session at that track.
+Stored as JSON, one file per track, found again by the start/finish line's
+position. A profile has its own origin (its start line), so it lines up with
+any session at that track.
+
+Two places, merged by file name:
+  built-in   tracks/ in the repo, shipped inside every build (read-only).
+             Turns and start line only: official map images are the
+             tracks' artwork, so they stay on the user's own machine.
+  local      <data dir>/raceoverlay/tracks/ (osutil.data_dir()). New tracks,
+             and edits to a built-in one, which then override it (same file
+             name) until "Reset to built-in" removes the local copy.
 
 The map image is placed with a similarity transform (scale, rotation,
 shift) from two point pairs the user clicks: a spot on the image and the
@@ -15,8 +23,10 @@ to the trace, then stored as latitude/longitude.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +38,19 @@ SAME_TRACK_M = 150.0
 
 
 def tracks_dir() -> Path:
+    """Local tracks (this machine's own and edited ones)."""
     return osutil.data_dir() / "tracks"
+
+
+def builtin_dir() -> Path | None:
+    """The tracks/ folder shipped with the app: next to src/ in a checkout,
+    inside the bundle in a packaged build."""
+    env = os.environ.get("RACEOVERLAY_BUILTIN_TRACKS")
+    cands = [Path(env)] if env else []
+    if getattr(sys, "frozen", False):
+        cands.append(Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "tracks")
+    cands.append(Path(__file__).resolve().parents[2] / "tracks")
+    return next((c for c in cands if c.is_dir()), None)
 
 
 def to_xy(lat, lon, lat0: float, lon0: float) -> np.ndarray:
@@ -125,6 +147,13 @@ class TrackProfile:
     image: str | None = None   # copy of the map image, inside tracks_dir()
     transform: tuple[float, float, float, float] | None = None  # a.re, a.im, b.re, b.im
     path: str | None = None    # where it was loaded from / saved to
+    builtin: bool = False      # loaded from the shipped tracks/ folder
+    edited: bool = False       # local copy overriding a built-in one
+
+    @property
+    def key(self) -> str:
+        """Stable id across machines and installs: the file name."""
+        return Path(self.path).stem if self.path else ""
 
     def ab(self) -> tuple[complex, complex] | None:
         if not self.transform:
@@ -154,11 +183,23 @@ class TrackProfile:
         return f"T{max(nums) + 1 if nums else len(self.turns) + 1}"
 
     # ----------------------------------------------------------- storage
-    def to_dict(self) -> dict:
+    def to_dict(self, share: bool = False) -> dict:
+        """share=True: for the built-in library, without the map image."""
+        img = Path(self.image).name if self.image and not share else None
         return {"name": self.name, "start": [self.lat0, self.lon0],
                 "turns": [{"name": t.name, "lat": t.lat, "lon": t.lon} for t in self.turns],
-                "image": Path(self.image).name if self.image else None,
-                "transform": list(self.transform) if self.transform else None}
+                "image": img,
+                "transform": list(self.transform) if self.transform and img else None}
+
+    def export(self, dest: str | Path) -> Path:
+        """Write a shareable copy (no image) for adding to the built-in library."""
+        dest = Path(dest)
+        dest.write_text(json.dumps(self.to_dict(share=True), indent=2) + "\n",
+                        encoding="utf-8")
+        return dest
+
+    def file_stem(self) -> str:
+        return re.sub(r"[^A-Za-z0-9]+", "_", self.name).strip("_").lower() or "track"
 
     @classmethod
     def from_dict(cls, d: dict, path: str | None = None) -> "TrackProfile":
@@ -172,7 +213,10 @@ class TrackProfile:
     def save(self, folder: Path | None = None) -> Path:
         folder = Path(folder) if folder else tracks_dir()
         folder.mkdir(parents=True, exist_ok=True)
-        stem = re.sub(r"[^A-Za-z0-9]+", "_", self.name).strip("_").lower() or "track"
+        stem = self.file_stem()
+        if self.builtin and self.path:  # never write into the shipped library: override it locally
+            self.path = str(folder / Path(self.path).name)
+            self.builtin, self.edited = False, True
         dest = Path(self.path) if self.path else folder / f"{stem}.json"
         n = 2
         while not self.path and dest.exists() and not self._same_place(dest):
@@ -202,15 +246,42 @@ def _same_place_impl(self, other: Path) -> bool:
 TrackProfile._same_place = _same_place_impl
 
 
-def load_all(folder: Path | None = None) -> list[TrackProfile]:
-    folder = Path(folder) if folder else tracks_dir()
-    out = []
-    for f in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+def _read_folder(folder: Path | None) -> dict[str, TrackProfile]:
+    out = {}
+    for f in sorted(folder.glob("*.json")) if folder and folder.is_dir() else []:
         try:
-            out.append(TrackProfile.from_dict(json.loads(f.read_text(encoding="utf-8")), str(f)))
+            out[f.stem] = TrackProfile.from_dict(json.loads(f.read_text(encoding="utf-8")), str(f))
         except (OSError, ValueError, KeyError, TypeError):
             continue
     return out
+
+
+def load_all(folder: Path | None = None) -> list[TrackProfile]:
+    """Every track: built-in ones, with local copies of the same file name
+    taking their place. Passing a folder reads just that folder."""
+    if folder is not None:
+        return list(_read_folder(Path(folder)).values())
+    merged = {}
+    for k, p in _read_folder(builtin_dir()).items():
+        p.builtin = True
+        merged[k] = p
+    for k, p in _read_folder(tracks_dir()).items():
+        p.edited = k in merged
+        merged[k] = p
+    return [merged[k] for k in sorted(merged)]
+
+
+def reset_to_builtin(p: TrackProfile) -> TrackProfile | None:
+    """Delete the local copy that overrides a built-in track; returns the
+    built-in one (None if there isn't one, and nothing is deleted)."""
+    if not p.edited or not p.path:
+        return None
+    base = _read_folder(builtin_dir()).get(p.key)
+    if base is None:
+        return None
+    Path(p.path).unlink(missing_ok=True)
+    base.builtin = True
+    return base
 
 
 def find(lat: float, lon: float, folder: Path | None = None) -> TrackProfile | None:
