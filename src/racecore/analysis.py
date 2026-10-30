@@ -8,7 +8,8 @@ different line or a session logged a little more distance. From that:
 
   - time at every metre of the lap, so any lap can be compared with any other
   - delta: how far ahead/behind the reference a lap was at each point
-  - sectors (equal thirds of the reference lap) and the theoretical best
+  - sectors (the track's sector lines, else equal thirds of the reference
+    lap) and the theoretical best
   - corners (found on the reference lap) and, per lap, the time gained or
     lost in each corner's stretch of track, minimum speed and braking point
 
@@ -135,6 +136,7 @@ class Analysis:
         self.profile = profile
         if self.ref is not None:
             self._find_corners()
+            self._find_sectors()
 
     @property
     def origin(self) -> tuple[float, float] | None:
@@ -228,8 +230,8 @@ class Analysis:
         for ld in self.laps:
             ld.d = self._distance(ld)
             ld.time_at = self._time_on_grid(ld)
-            ld.sectors = self._sectors(ld)
         self._find_corners()
+        self._find_sectors()
 
     def _distance(self, ld: LapData) -> np.ndarray:
         """Distance along the reference for every sample of a lap.
@@ -287,10 +289,36 @@ class Analysis:
     def dist_at(self, ld: LapData, t_into: float) -> float:
         return float(np.interp(t_into, ld.t, ld.d))
 
+    # sector boundaries: distances along the reference where sectors start
+    # (after the first); sector_source says where they came from
+    sector_bounds: list[float] = []
+    sector_source: str = "thirds"
+
+    @property
+    def n_sectors(self) -> int:
+        return len(self.sector_bounds) + 1
+
+    def _find_sectors(self):
+        """Sector lines from the track profile, else thirds of the lap."""
+        bounds = []
+        p = self.profile
+        if p is not None and p.sectors and self._origin is not None:
+            for pt in p.sectors_xy(*self._origin):
+                d = self._path_distance(pt)
+                if 20.0 < d < self.length - 20.0:      # not on the start line
+                    bounds.append(d)
+        bounds = sorted(set(round(b, 1) for b in bounds))
+        if bounds:
+            self.sector_bounds, self.sector_source = bounds, "track"
+        else:
+            self.sector_bounds = [self.length * k / SECTORS for k in range(1, SECTORS)]
+            self.sector_source = "thirds"
+        for ld in self.laps:
+            ld.sectors = self._sectors(ld)
+
     def _sectors(self, ld: LapData) -> list[float]:
-        b = [self.length * k / SECTORS for k in range(SECTORS + 1)]
-        ts = [0.0] + [self.time_at(ld, x) for x in b[1:-1]] + [ld.time]
-        return [ts[k + 1] - ts[k] for k in range(SECTORS)]
+        ts = [0.0] + [self.time_at(ld, x) for x in self.sector_bounds] + [ld.time]
+        return [ts[k + 1] - ts[k] for k in range(len(ts) - 1)]
 
     # ------------------------------------------------------------ results
     def delta(self, ld: LapData) -> np.ndarray:
@@ -337,7 +365,7 @@ class Analysis:
 
     def best_sectors(self) -> list[tuple[float, LapData]]:
         out = []
-        for k in range(SECTORS):
+        for k in range(self.n_sectors):
             ld = min(self.timed_laps(), key=lambda x: x.sectors[k])
             out.append((ld.sectors[k], ld))
         return out

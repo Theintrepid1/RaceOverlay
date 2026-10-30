@@ -132,3 +132,39 @@ def test_split_turns_get_their_own_stretch():
     slow = next(ld for ld in a.timed_laps() if ld.lap.n == 2)
     res = a.corner_results(slow)
     assert abs(sum(r.lost for r in res) - a.delta(slow)[-1]) < 0.05
+
+
+def test_sectors_from_track_lines_or_thirds():
+    tel = _session([(None, 0), (1, 8.0), (None, 0)], noise=0.5)
+    a = analysis.Analysis()
+    a.add(tel, "s1.csv")
+    # no profile: thirds of the reference lap
+    assert a.sector_source == "thirds" and a.n_sectors == 3
+    assert np.allclose(a.sector_bounds, [a.length / 3, 2 * a.length / 3])
+    for ld in a.laps:
+        assert abs(sum(ld.sectors) - ld.time) < 1e-6
+    # four lines on the profile: five sectors, in lap order whatever the click order
+    ref = a.ref
+    at = [0.8 * a.length, 0.2 * a.length, 0.5 * a.length, 0.65 * a.length]
+    pts = [(np.interp(d, a._ref_s, ref.xy[:, 0]), np.interp(d, a._ref_s, ref.xy[:, 1]))
+           for d in at]
+    ll = tracks.to_latlon(np.array(pts), *a.origin)
+    p = tracks.TrackProfile("S", LAT0, LON0, sectors=[(float(la), float(lo)) for la, lo in ll])
+    a.use_profile(p)
+    assert a.sector_source == "track" and a.n_sectors == 5
+    assert np.allclose(a.sector_bounds, sorted(at), atol=2.0)
+    for ld in a.laps:
+        assert len(ld.sectors) == 5 and abs(sum(ld.sectors) - ld.time) < 1e-6
+    assert len(a.best_sectors()) == 5
+    assert a.theoretical_best() <= min(ld.time for ld in a.timed_laps()) + 1e-9
+    # a line on the start/finish line is ignored
+    a.use_profile(tracks.TrackProfile("S", LAT0, LON0, sectors=[a.origin]))
+    assert a.sector_source == "thirds"
+    # sectors survive saving and loading
+    back = tracks.TrackProfile.from_dict(p.to_dict())
+    assert np.allclose(back.sectors, p.sectors) and back.turns == []
+
+
+def test_builtin_vir_has_sector_lines():
+    vir = next(t for t in tracks.load_all(tracks.builtin_dir()) if t.key == "vir_full")
+    assert len(vir.sectors) == 2
