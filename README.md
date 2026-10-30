@@ -39,6 +39,21 @@ on video files. It asks for the video and CSV with file pickers, reopens the
 saved sync if one exists, and shows problems as dialogs. Logs go to
 `~/.local/state/raceoverlay/launch.log`. Moved the folder? Re-run the installer.
 
+## Windows (from source, for testing)
+
+There's no Windows installer yet. To try it on Windows from a copy of this
+repo: install Python 3.11–3.13 (`winget install Python.Python.3.13`), then
+double-click `windows\setup.bat` once. It makes `.venv`, installs the Python
+packages and downloads ffmpeg + libmpv into `windows-bin\` (about 250 MB).
+After that, `windows\RaceOverlay.bat` and `windows\RaceAnalysis.bat` start
+the apps. Logs go to `%LOCALAPPDATA%\raceoverlay\launch.log`; settings live
+in the registry (`HKCU\Software\raceoverlay`), saved tracks in
+`%APPDATA%\raceoverlay`.
+
+What's different on Windows: GPU encoding uses Intel QSV, NVIDIA NVENC or AMD
+AMF (whichever works; the app tests each); preview decoding uses Direct3D 11;
+SD cards are found on any drive letter with a `DCIM\1xxGOPRO` folder.
+
 ## The app (start here)
 
 Video with a live overlay preview on the left; four tabs on the right.

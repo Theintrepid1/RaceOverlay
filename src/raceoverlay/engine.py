@@ -32,7 +32,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from racecore import telemetry
+from racecore import osutil, telemetry
 
 from . import gauges, media
 from .render import OverlayContext, draw_overlay
@@ -165,6 +165,7 @@ def prepare_workdirs(job: Job) -> None:
                                 and stamp.read_text().strip() == fp):
             shutil.rmtree(wd, ignore_errors=True)
         wd.mkdir(parents=True, exist_ok=True)
+        osutil.hide_path(wd)  # ".name.parts" isn't hidden by name on Windows
         stamp.write_text(fp)
 
 
@@ -206,10 +207,9 @@ def _segment_cmd(seg: Segment, w: int, h: int, tiles, atlas_wh, hwdec: bool):
     spans = info.spans(seg.start, seg.frames / fps + 1.0 / fps)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     cmd += media.hw_global_args(job.encoder)
-    node = media.render_node()
+    dec = media.hwdec_args() if hwdec else []
     for path, ss, dur in spans:
-        if hwdec and node:
-            cmd += ["-hwaccel", "vaapi", "-hwaccel_device", node]
+        cmd += dec
         cmd += ["-ss", f"{ss:.6f}", "-t", f"{dur:.6f}", "-i", path]
     graph = []
     # Join first, then change frame rate once, so chapter joins don't drop
@@ -447,10 +447,7 @@ def main(argv=None) -> int:
     if not args:
         print(__doc__)
         return 2
-    try:
-        os.setpgrp()  # lets the GUI pause/stop us and our children as a group
-    except OSError:
-        pass
+    osutil.new_process_group()  # lets the GUI pause/stop us and our children
     job = Job.load(args[0])
     try:
         for p in run(job):

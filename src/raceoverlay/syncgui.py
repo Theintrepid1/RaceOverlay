@@ -24,15 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
-from racecore import gosync, telemetry  # noqa: E402
+from racecore import gosync, osutil, telemetry  # noqa: E402
 
 from . import gauges  # noqa: E402  (Qt imported in main/below)
 
 KMH_PER_MPH = 1.60934
 TRACE_WINDOW = 60.0  # seconds of speed trace shown around the playhead
 PKG_ROOT = str(Path(__file__).resolve().parents[1])  # dir containing raceoverlay/
-NETWORK_FS = {"cifs", "smb3", "smbfs", "nfs", "nfs4", "fuse.sshfs",
-              "fuse.kio-fuse", "fuse.rclone", "9p", "davfs", "fuse.gvfsd-fuse"}
+NETWORK_FS = osutil.NETWORK_FS
 
 
 def _prefer_portal_dialogs():
@@ -53,14 +52,15 @@ def _prefer_portal_dialogs():
 
 
 _prefer_portal_dialogs()
-# mpv can only hand VAAPI-decoded frames to OpenGL through EGL. Wayland
-# sessions use EGL already; make X11 sessions use it too (Qt defaults to GLX).
-os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_egl")
+if osutil.IS_LINUX:
+    # mpv can only hand VAAPI-decoded frames to OpenGL through EGL. Wayland
+    # sessions use EGL already; make X11 sessions use it too (Qt defaults
+    # to GLX).
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_egl")
 
 from PySide6 import QtCore, QtGui, QtOpenGLWidgets, QtWidgets  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
 
-import signal  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 
@@ -100,20 +100,7 @@ def save_sync(video: str, data: dict) -> Path | None:
 
 def network_mounts() -> list[str]:
     """Mounted network shares (SMB/NFS/sshfs/...) plus removable media."""
-    out = []
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) >= 3 and parts[2] in NETWORK_FS:
-                    out.append(parts[1].replace("\\040", " "))
-    except OSError:
-        pass
-    user = os.environ.get("USER", "")
-    for extra in (f"/run/media/{user}", f"/run/user/{os.getuid()}/gvfs"):
-        if os.path.isdir(extra):
-            out.append(extra)
-    return sorted(set(out))
+    return osutil.network_mounts()
 
 
 def pick_file(parent, title: str, key: str, filt: str) -> str | None:
@@ -137,16 +124,29 @@ def pick_file(parent, title: str, key: str, filt: str) -> str | None:
 
 # Preview decoding modes -> mpv hwdec values. Vulkan video decoding is left
 # out of Auto/Direct: it corrupts frames on some NVIDIA drivers.
-PREVIEW_DECODE = {
-    "copy": ("Auto: GPU, safe copy (recommended)", "nvdec-copy,vaapi-copy"),
-    "direct": ("Direct GPU (fastest)", "nvdec,vaapi"),
-    "off": ("Off: CPU only", "no"),
-    "t_nvdec_copy": ("Test: NVDEC, copy", "nvdec-copy"),
-    "t_nvdec": ("Test: NVDEC, direct", "nvdec"),
-    "t_vaapi_copy": ("Test: VA-API, copy", "vaapi-copy"),
-    "t_vaapi": ("Test: VA-API, direct", "vaapi"),
-    "t_vulkan_copy": ("Test: Vulkan, copy", "vulkan-copy"),
-}
+if osutil.IS_WIN:
+    # Direct3D 11 works on any GPU vendor; NVDEC is the NVIDIA fallback.
+    PREVIEW_DECODE = {
+        "copy": ("Auto: GPU, safe copy (recommended)", "d3d11va-copy,nvdec-copy"),
+        "direct": ("Direct GPU (fastest)", "d3d11va,nvdec"),
+        "off": ("Off: CPU only", "no"),
+        "t_d3d11_copy": ("Test: Direct3D 11, copy", "d3d11va-copy"),
+        "t_d3d11": ("Test: Direct3D 11, direct", "d3d11va"),
+        "t_dxva2_copy": ("Test: DXVA2, copy", "dxva2-copy"),
+        "t_nvdec_copy": ("Test: NVDEC, copy", "nvdec-copy"),
+        "t_nvdec": ("Test: NVDEC, direct", "nvdec"),
+    }
+else:
+    PREVIEW_DECODE = {
+        "copy": ("Auto: GPU, safe copy (recommended)", "nvdec-copy,vaapi-copy"),
+        "direct": ("Direct GPU (fastest)", "nvdec,vaapi"),
+        "off": ("Off: CPU only", "no"),
+        "t_nvdec_copy": ("Test: NVDEC, copy", "nvdec-copy"),
+        "t_nvdec": ("Test: NVDEC, direct", "nvdec"),
+        "t_vaapi_copy": ("Test: VA-API, copy", "vaapi-copy"),
+        "t_vaapi": ("Test: VA-API, direct", "vaapi"),
+        "t_vulkan_copy": ("Test: Vulkan, copy", "vulkan-copy"),
+    }
 DEFAULT_PREVIEW_DECODE = "copy"
 
 
@@ -162,16 +162,42 @@ PREVIEW_MODES = {
 
 
 def preview_mode() -> str:
-    """'native': mpv draws into its own X11 window inside ours, exactly like
-    the standalone player (newer gpu-next renderer, its own GPU interop).
-    'embedded': mpv renders into Qt's OpenGL widget via the render API; on
-    some NVIDIA setups that path stripes every GPU-decoded frame.
-    Native needs X11 (XWayland is fine on Wayland desktops)."""
+    """'native': mpv draws into its own child window inside ours, exactly
+    like the standalone player (newer gpu-next renderer, its own GPU
+    interop). 'embedded': mpv renders into Qt's OpenGL widget via the render
+    API; on some NVIDIA setups that path stripes every GPU-decoded frame.
+    On Linux native needs X11 (XWayland is fine on Wayland desktops); on
+    Windows it's a plain child window and always available."""
     mode = os.environ.get("RACEOVERLAY_PREVIEW") or settings().value(
         "preview/mode", "native")
-    if mode == "native" and not os.environ.get("DISPLAY"):
+    if mode == "native" and osutil.IS_LINUX and not os.environ.get("DISPLAY"):
         return "embedded"  # pure Wayland without XWayland
     return mode if mode in PREVIEW_MODES else "native"
+
+
+def use_native_video() -> bool:
+    """Native preview chosen, and Qt is on a platform that can host it."""
+    return (preview_mode() == "native"
+            and QtGui.QGuiApplication.platformName() in ("xcb", "windows"))
+
+
+def force_qt_platform_for_native():
+    """Before QApplication: on Linux, put Qt on X11 (XWayland) so mpv's
+    native window can embed, even when the session sets
+    QT_QPA_PLATFORM=wayland (under Wayland mpv opens a separate window
+    instead). Returns a function that restores the setting for programs we
+    launch. Nothing to do on Windows."""
+    if not osutil.IS_LINUX or preview_mode() != "native":
+        return lambda: None
+    orig = os.environ.get("QT_QPA_PLATFORM")
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+    def restore():
+        if orig is None:
+            os.environ.pop("QT_QPA_PLATFORM", None)
+        else:
+            os.environ["QT_QPA_PLATFORM"] = orig
+    return restore
 
 
 def engine_args(job_file: str) -> list[str]:
@@ -349,7 +375,7 @@ class MpvWidget(QtOpenGLWidgets.QOpenGLWidget):
 
 
 class MpvNativeWidget(QtWidgets.QWidget):
-    """mpv drawing into its own native (X11) child window, like standalone
+    """mpv drawing into its own native (X11/Win32) child window, like standalone
     mpv. Mouse and keyboard events fall through to Qt (mpv is told to ignore
     them), so gauge dragging and shortcuts work the same as embedded."""
 
@@ -374,10 +400,13 @@ class MpvNativeWidget(QtWidgets.QWidget):
                      sys.stderr.write(f"[mpv {l}] {c}: {m}")}
         if os.environ.get("RACEOVERLAY_GPU_SW"):  # headless testing only
             extra["gpu_sw"] = True
-        self.player = mpv.MPV(
+        if osutil.IS_LINUX:
             # X11 only: on a Wayland desktop mpv would otherwise pick a
             # Wayland context, ignore the window id and open its own window.
-            vo="gpu-next,gpu", gpu_context="x11egl", hwdec=preview_hwdec(),
+            # Windows: mpv's default (Direct3D 11) is the right one.
+            extra["gpu_context"] = "x11egl"
+        self.player = mpv.MPV(
+            vo="gpu-next,gpu", hwdec=preview_hwdec(),
             keep_open="yes",
             hr_seek="yes", pause=True, input_default_bindings=False,
             input_vo_keyboard=False, input_cursor=False, cursor_autohide="no",
@@ -895,8 +924,7 @@ class MainWindow(QtWidgets.QMainWindow):
     # ================================================================ UI ===
 
     def _build_ui(self):
-        native = (preview_mode() == "native"
-                  and QtGui.QGuiApplication.platformName() == "xcb")
+        native = use_native_video()
         self.video = MpvNativeWidget() if native else MpvWidget()
         self.video.pressed.connect(self._video_pressed)
         self.video.dragged.connect(self._video_dragged)
@@ -2892,23 +2920,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stopping = False
         self._set_render_buttons()
 
-    def _signal_job(self, sig):
+    def _job_pid(self) -> int | None:
         if self.proc is None:
-            return
-        pid = int(self.proc.processId())
-        try:
-            os.killpg(pid, sig)  # engine runs as its own process group
-        except (ProcessLookupError, PermissionError):
-            try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                pass
+            return None
+        return int(self.proc.processId()) or None
 
     def _pause_render(self):
-        if self.proc is None:
+        pid = self._job_pid()
+        if pid is None:
             return
         self._paused = not self._paused
-        self._signal_job(signal.SIGSTOP if self._paused else signal.SIGCONT)
+        (osutil.suspend_tree if self._paused else osutil.resume_tree)(pid)
         if self._paused:
             self.stats_lbl.setText("Paused")
         self._set_render_buttons()
@@ -2916,10 +2938,10 @@ class MainWindow(QtWidgets.QMainWindow):
     _stopping = False
 
     def _stop_render(self):
-        if self.proc is not None:
+        pid = self._job_pid()
+        if pid is not None:
             self._stopping = True
-            self._signal_job(signal.SIGTERM)
-            self._signal_job(signal.SIGCONT)  # a paused job must wake to exit
+            osutil.terminate_tree(pid)
 
     def _set_status(self, text: str):
         self.status.setText(text)
@@ -2957,17 +2979,9 @@ def main(argv: list[str] | None = None) -> int:
     fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 
-    # The native mpv window needs Qt on X11 (XWayland on Wayland desktops),
-    # even when the session sets QT_QPA_PLATFORM=wayland: under Wayland mpv
-    # can't embed and opens a separate top-level window instead.
-    orig_qpa = os.environ.get("QT_QPA_PLATFORM")
-    if preview_mode() == "native":
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    restore_qpa = force_qt_platform_for_native()
     app = QtWidgets.QApplication(["raceoverlay"])
-    if orig_qpa is None:  # programs we launch get the session's setting
-        os.environ.pop("QT_QPA_PLATFORM", None)
-    else:
-        os.environ["QT_QPA_PLATFORM"] = orig_qpa
+    restore_qpa()  # programs we launch get the session's setting
     app.setApplicationName("raceoverlay")
     from . import __version__
     app.setApplicationDisplayName(f"Race Overlay {__version__}")
@@ -2984,15 +2998,13 @@ def main(argv: list[str] | None = None) -> int:
     missing = [t for t in ("ffmpeg", "ffprobe") if not shutil.which(t)]
     if missing:
         return fail("ffmpeg not found",
-                    f"Missing: {', '.join(missing)}\n\nInstall it with:\n"
-                    "sudo pacman -S ffmpeg")
+                    f"Missing: {', '.join(missing)}\n\n"
+                    + osutil.install_hint("ffmpeg"))
     try:
         import mpv  # noqa: F401
     except (ImportError, OSError) as e:
         return fail("mpv not available",
-                    f"{e}\n\nInstall libmpv with:\nsudo pacman -S mpv\n"
-                    "and the Python binding with:\n"
-                    ".venv/bin/pip install python-mpv")
+                    f"{e}\n\n" + osutil.install_hint("mpv"))
 
     def excepthook(etype, value, tb):
         text = "".join(traceback.format_exception(etype, value, tb))

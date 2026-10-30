@@ -27,7 +27,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from racecore import analysis, engine, gosync, ingest, telemetry, tracks
 from raceoverlay import media
-from raceoverlay.syncgui import pick_file, preview_mode, settings
+from raceoverlay.syncgui import force_qt_platform_for_native, pick_file, settings
 
 from .common import FT, INK_DIM, MAX_COMPARE, MPH, REF_COLOR, SERIES, fmt_lap, session_name
 from .pages.corners import CornersPage
@@ -880,14 +880,9 @@ def main(argv: list[str] | None = None) -> int:
     fmt = QtGui.QSurfaceFormat()
     fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
-    orig_qpa = os.environ.get("QT_QPA_PLATFORM")
-    if preview_mode() == "native":
-        os.environ["QT_QPA_PLATFORM"] = "xcb"
+    restore_qpa = force_qt_platform_for_native()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["raceanalysis"])
-    if orig_qpa is None:
-        os.environ.pop("QT_QPA_PLATFORM", None)
-    else:
-        os.environ["QT_QPA_PLATFORM"] = orig_qpa
+    restore_qpa()
     app.setApplicationName("raceoverlay")  # share Race Overlay's settings
     app.setApplicationDisplayName("Race Analysis")
     app.setDesktopFileName("raceanalysis")

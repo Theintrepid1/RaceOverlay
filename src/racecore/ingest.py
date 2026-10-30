@@ -25,6 +25,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import osutil
+
 # GoPro chapter names, same rule as raceoverlay.media.CHAPTER_RE:
 # G + H/X/L/P, 2-digit chapter, 4-digit recording, e.g. GH020123.MP4.
 CHAPTER_RE = re.compile(r"^(G[A-Z])(\d{2})(\d{4})(\.mp4)$", re.IGNORECASE)
@@ -77,25 +79,7 @@ class Pairing:
 # ------------------------------------------------------------------ cards ---
 
 def _mount_points() -> list[str]:
-    pts = []
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                mp = line.split()[1].replace("\\040", " ")
-                if mp.startswith(("/media/", "/run/media/", "/mnt/")):
-                    pts.append(mp)
-    except OSError:
-        pass
-    for base in (f"/run/media/{os.environ.get('USER', '')}",
-                 f"/media/{os.environ.get('USER', '')}", "/media", "/mnt"):
-        if os.path.isdir(base):
-            pts += [os.path.join(base, d) for d in os.listdir(base)]
-    seen, out = set(), []
-    for p in pts:
-        if p not in seen and os.path.isdir(p):
-            seen.add(p)
-            out.append(p)
-    return out
+    return osutil.drive_roots()
 
 
 def is_card(root: str) -> bool:
@@ -116,7 +100,8 @@ def find_cards() -> list[Card]:
                 used = f"{(st.total - st.free) / 1e9:.1f} of {st.total / 1e9:.0f} GB used"
             except OSError:
                 used = ""
-            cards.append(Card(mp, f"{Path(mp).name}  ({used})" if used else Path(mp).name))
+            name = osutil.drive_label(mp)
+            cards.append(Card(mp, f"{name}  ({used})" if used else name))
     return cards
 
 

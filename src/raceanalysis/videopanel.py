@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from raceoverlay.syncgui import MpvNativeWidget, MpvWidget, _btn, preview_mode
+from raceoverlay.syncgui import MpvNativeWidget, MpvWidget, _btn, use_native_video
 
 from .common import GAIN, INK, INK_DIM, INK_FAINT, LOSS, PANEL
 
@@ -180,8 +180,7 @@ class VideoPanel(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._native = (preview_mode() == "native"
-                        and QtGui.QGuiApplication.platformName() == "xcb")
+        self._native = use_native_video()
         native = self._native
         self.video = MpvNativeWidget(self) if native else MpvWidget(self)
         self.video.setMinimumSize(160, 90)
