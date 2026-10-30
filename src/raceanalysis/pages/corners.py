@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from raceoverlay.syncgui import _note, settings
 
+from .. import gglabels
 from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, cap_columns, fmt_gap
 
 
@@ -82,6 +83,7 @@ class CornersPage(QtWidgets.QWidget):
 
         self.gg = pg.PlotWidget()
         self.gg.setAspectLocked(True)
+        self.labels = gglabels.GGLabels(self.gg)
         self.gg.setMenuEnabled(False)
         for ax in ("left", "bottom"):
             self.gg.getAxis(ax).enableAutoSIPrefix(False)
@@ -374,17 +376,9 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.addItem(lbl)
         self.gg.plot([-R, R], [0, 0], pen=grid_pen)
         self.gg.plot([0, 0], [-R, R], pen=grid_pen)
-        e = R * 0.97
         kx, ky = self._k()
         self.gg.setLabel("bottom", "Lateral g")
         self.gg.setLabel("left", "Longitudinal g")
-        for txt, x, y, anc in (("Braking", 0, -e * ky, (0.5, 0 if ky > 0 else 1)),
-                               ("Accel", 0, e * ky, (0.5, 1 if ky > 0 else 0)),
-                               ("Left turn", -e * kx, 0, (0 if kx > 0 else 1, 1)),
-                               ("Right turn", e * kx, 0, (1 if kx > 0 else 0, 1))):
-            t = pg.TextItem(txt, color="#8a8983", anchor=anc)
-            t.setPos(x, y)
-            self.gg.addItem(t)
         if a.envelope is not None:
             o = a.envelope.outline()
             self.gg.plot(kx * o[:, 0], ky * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
@@ -428,7 +422,10 @@ class CornersPage(QtWidgets.QWidget):
         self.marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=14,
                                    symbolPen=pg.mkPen(CURSOR, width=2),
                                    symbolBrush=pg.mkBrush(w.color(ld.key)))
-        self.gg.setRange(xRange=(-R, R), yRange=(-R, R), padding=0.02)
+        pts = [(lap.lat_g[lap.v > 30], lap.lon_g[lap.v > 30]) for lap in (a.ref, ld)
+               if lap is not None and lap.lat_g is not None and lap.lon_g is not None]
+        outl = [a.envelope.outline()] if a.envelope is not None else []
+        self.labels.set(gglabels.reach(pts, outl), kx, ky, R)
         self.cursor(w.cursor_d)
         self.ref_cursor(w.ref_d)
 

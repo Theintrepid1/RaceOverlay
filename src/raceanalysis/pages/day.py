@@ -16,6 +16,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from racecore import day
 from raceoverlay.syncgui import _btn, _note, settings
 
+from .. import gglabels
 from ..common import GAIN, INK_DIM, LIMIT, LOSS, NEUTRAL, SERIES, cap_columns, fmt_lap
 
 
@@ -90,6 +91,7 @@ class DayPage(QtWidgets.QWidget):
 
         self.env = pg.PlotWidget()
         self.env.setAspectLocked(True)
+        self.env_labels = gglabels.GGLabels(self.env, which=("accel", "brake"))
         self.env.setMenuEnabled(False)
         self.env.hideAxis("left")
         self.env.hideAxis("bottom")
@@ -336,11 +338,6 @@ class DayPage(QtWidgets.QWidget):
                 p.plot(r * np.cos(th), r * np.sin(th), pen=grid)
         p.plot([-R, R], [0, 0], pen=grid)
         p.plot([0, 0], [-R, R], pen=grid)
-        for txt, x, y, anc in (("Braking", 0, -R * 0.97 * ky, (0.5, 0 if ky > 0 else 1)),
-                               ("Accel", 0, R * 0.97 * ky, (0.5, 1 if ky > 0 else 0))):
-            ti = pg.TextItem(txt, color="#8a8983", anchor=anc)
-            ti.setPos(x, y)
-            p.addItem(ti)
         if a.envelope is not None:
             o = a.envelope.outline()
             p.plot(kx * o[:, 0], ky * o[:, 1], pen=pg.mkPen(LIMIT, width=1.5,
@@ -353,7 +350,10 @@ class DayPage(QtWidgets.QWidget):
         lbl = pg.TextItem("dashed: whole day", color=INK_DIM, anchor=(0, 1))
         lbl.setPos(-R, -R)
         p.addItem(lbl)
-        p.setRange(xRange=(-R, R), yRange=(-R, R), padding=0.02)
+        outl = [e.outline() for e in self.envs if e is not None]
+        if a.envelope is not None:
+            outl.append(a.envelope.outline())
+        self.env_labels.set(gglabels.reach((), outl), kx, ky, R)
 
     def _draw_trend(self):
         p = self.trend
