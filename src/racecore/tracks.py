@@ -15,7 +15,6 @@ to the trace, then stored as latitude/longitude.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -23,12 +22,13 @@ from pathlib import Path
 
 import numpy as np
 
+from . import osutil
+
 SAME_TRACK_M = 150.0
 
 
 def tracks_dir() -> Path:
-    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return base / "raceoverlay" / "tracks"
+    return osutil.data_dir() / "tracks"
 
 
 def to_xy(lat, lon, lat0: float, lon0: float) -> np.ndarray:

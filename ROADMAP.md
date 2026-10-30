@@ -48,7 +48,7 @@
 - Native AiM .xrk (libxrk), MoTeC .ld (check parser license)
 
 ## Later
-- Windows build (port Linux-only bits, GitHub Actions build, installer; signing decision)
+- Windows build: Linux-only bits ported, runs from source (windows/setup.bat); still to do: GitHub Actions build, installer, signing decision
 - Flatpak / Flathub if it goes public
 
 ## Shelved

@@ -9,7 +9,7 @@ import os
 import sys
 import tempfile
 
-from racecore import telemetry
+from racecore import osutil, telemetry
 
 from . import demo, engine, gauges, media
 
@@ -195,10 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         g_rotate=tel.g_align.get("angle") if tel.g_source == "raw" else None,
         g_flip=bool(tel.g_align.get("flip")) if tel.g_source == "raw" else False,
         gauge_opts=args.gauge_opts, overrides=overrides or None)
-    try:
-        os.setpgrp()
-    except OSError:
-        pass
+    osutil.new_process_group()
     for p in engine.run(job):
         print(f"\nWrote {p}")
     return 0

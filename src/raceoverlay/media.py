@@ -8,9 +8,12 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from racecore import osutil
 
 # GoPro chapter names: G + H (AVC) / X (HEVC) / L (low-res proxy) / P,
 # 2-digit chapter, 4-digit recording number. e.g. GH020123.MP4 = chapter 2.
@@ -134,7 +137,9 @@ def concat_list(paths: list[str], dest: str):
         return p.replace("'", "'\\''")
     with open(dest, "w", encoding="utf-8") as fh:
         for p in paths:
-            fh.write(f"file '{esc(os.path.abspath(p))}'\n")
+            # Forward slashes: ffmpeg takes them on Windows too, and they
+            # sidestep any backslash-escaping questions in the list file.
+            fh.write(f"file '{esc(Path(os.path.abspath(p)).as_posix())}'\n")
 
 
 def merged_name(paths: list[str]) -> str:
@@ -157,8 +162,18 @@ def save_merged_cmd(paths: list[str], out: str, list_file: str) -> list[str]:
 # ------------------------------------------------------- encoder detection --
 
 def render_node() -> str | None:
+    """Linux GPU render node for VAAPI; None elsewhere."""
     nodes = sorted(glob.glob("/dev/dri/renderD*"))
     return nodes[0] if nodes else None
+
+
+def hwdec_args() -> list[str]:
+    """ffmpeg input options for GPU decoding (only used once detect_hw()
+    found that it works): VAAPI on Linux, Direct3D 11 on Windows."""
+    if osutil.IS_WIN:
+        return ["-hwaccel", "d3d11va"]
+    node = render_node()
+    return ["-hwaccel", "vaapi", "-hwaccel_device", node] if node else []
 
 
 # name -> (label, codec family, kind)
@@ -232,14 +247,12 @@ def encoder_args(encoder: str, quality: str = "Balanced",
 
 
 def _cache_file() -> Path:
-    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return base / "raceoverlay" / "hw.json"
+    return osutil.cache_dir() / "hw.json"
 
 
 def _ffmpeg_id() -> str:
     try:
-        exe = subprocess.run(["which", "ffmpeg"], capture_output=True,
-                             text=True).stdout.strip()
+        exe = shutil.which("ffmpeg") or ""
         st = os.stat(exe)
         return f"{exe}:{st.st_mtime_ns}:{render_node()}"
     except OSError:
@@ -282,16 +295,14 @@ def detect_hw(force: bool = False) -> dict:
         if _try(cmd):
             works.append(enc)
     hwdec = False
-    node = render_node()
-    if node:
+    if hwdec_args():
         tmp = cache.parent / "probe.mp4"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         if _try(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
                  "testsrc=s=320x240:r=30", "-frames:v", "10", "-c:v", "libx264",
                  "-pix_fmt", "yuv420p", str(tmp)]):
-            hwdec = _try(["ffmpeg", "-v", "error", "-hwaccel", "vaapi",
-                          "-hwaccel_device", node, "-i", str(tmp),
-                          "-f", "null", "-"])
+            hwdec = _try(["ffmpeg", "-v", "error"] + hwdec_args()
+                         + ["-i", str(tmp), "-f", "null", "-"])
         tmp.unlink(missing_ok=True)
     d = {"id": fid, "encoders": works or ["libx264"], "hwdecode": hwdec}
     try:

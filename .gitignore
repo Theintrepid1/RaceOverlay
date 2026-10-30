@@ -9,3 +9,6 @@ build-deps/
 *_overlay.mp4
 *_preview.mp4
 .*.parts/
+
+# Windows run-from-source downloads (windows/setup.bat)
+windows-bin/
