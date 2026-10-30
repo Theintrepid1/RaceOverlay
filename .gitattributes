@@ -1,1 +1,2 @@
-*.bat text eol=crlf
+# Stored with CRLF as-is, so a GitHub "Download ZIP" gets working batch files too
+*.bat -text
