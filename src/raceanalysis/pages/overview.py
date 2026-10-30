@@ -72,6 +72,7 @@ class _Card(QtWidgets.QFrame):
         self.v.setStyleSheet(f"color:{INK};")
         self.s = QtWidgets.QLabel("")
         self.s.setStyleSheet(f"color:{INK_DIM}; font-size:11px;")
+        self.s.setWordWrap(True)        # long lap names wrap, not widen the row
         for w in (self.t, self.v, self.s):
             lay.addWidget(w)
 

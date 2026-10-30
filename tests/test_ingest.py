@@ -87,7 +87,9 @@ def test_log_dates_and_candidates():
         lg = info[names[1]]
         assert lg.date == dt.date(2026, 9, 27) and lg.session == 2
         clip = ingest.Clip("0009", "GH", ["x"], 0, dt.datetime(2026, 9, 27, 10, 0))
-        assert {Path(c.path).name for c in ingest.candidates(clip, logs)} == set(names[:2])
+        # other.csv has no date in its name, so it's always worth trying
+        assert {Path(c.path).name for c in ingest.candidates(clip, logs)} == \
+            set(names[:2]) | {"other.csv"}
         clip.recorded = None
         assert len(ingest.candidates(clip, logs)) == 4
 

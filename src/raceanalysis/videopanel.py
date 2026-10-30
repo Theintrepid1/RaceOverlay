@@ -38,6 +38,9 @@ class _Readout(QtWidgets.QWidget):
     def __init__(self, title: str, unit: str = "", template: str = "888", parent=None):
         super().__init__(parent)
         self.template = template
+        # keep each block to its own width so the group stays centred and
+        # units sit next to their numbers
+        self.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Preferred)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -88,10 +91,12 @@ class ReadoutStrip(QtWidgets.QFrame):
             row.addWidget(w)
         row.addStretch(1)
         outer.addLayout(row)
+        self.row = row
         self.note = QtWidgets.QLabel("")
         self.note.setStyleSheet(f"color:{INK_DIM}; font-size:11px;")
         self.note.setAlignment(QtCore.Qt.AlignCenter)
         self.note.setWordWrap(True)
+        self.note.hide()        # an empty label still takes a line of height
         outer.addWidget(self.note)
         outer.addStretch(1)
         self.gear.hide()
@@ -115,6 +120,24 @@ class ReadoutStrip(QtWidgets.QFrame):
         self.px = px
         for w in self.items:
             w.set_size(px)
+        self.relayout()
+
+    def relayout(self):
+        """Lay the readouts out again from scratch. Qt caches sizes in the
+        nested row, so a new digit size (or a note line coming or going)
+        without the strip itself resizing left the old, smaller row height
+        in place and clipped the digits."""
+        for w in self.items:
+            w.layout().invalidate()
+            w.updateGeometry()          # drops the row's cached size for it
+            for i in range(self.row.count()):
+                it = self.row.itemAt(i)
+                if it.widget() is w:
+                    it.invalidate()
+        self.row.invalidate()
+        lay = self.layout()
+        lay.invalidate()
+        lay.setGeometry(self.rect())
 
     def needed_width(self, px: int) -> int:
         """Width the visible readouts need at a value size of px."""
@@ -130,7 +153,19 @@ class ReadoutStrip(QtWidgets.QFrame):
         return total + 22 * (len(vis) - 1) + 24 + 8
 
     def needed_height(self, px: int) -> int:
-        return int(px * 1.25) + 16 + (18 if self.note.text() else 0) + 8
+        """Height the readouts need at a value size of px, from the real
+        font metrics (a guess from px alone clipped the digits on desktops
+        with display scaling or taller system fonts)."""
+        f = QtGui.QFont(_digits_font())
+        f.setPixelSize(px)
+        value_h = QtGui.QFontMetrics(f).height()
+        title_h = self.lap.title.sizeHint().height()
+        m = self.layout().contentsMargins()
+        h = m.top() + m.bottom() + title_h + value_h
+        if self.note.text():
+            w = max(120, self.width() - m.left() - m.right())
+            h += self.layout().spacing() + self.note.heightForWidth(w)
+        return h + 4
 
     def show_values(self, lap: str, time: str, speed: str, unit: str, delta: float | None,
                     gear: str | None = None, rpm: str | None = None, note: str = "",
@@ -166,6 +201,9 @@ class ReadoutStrip(QtWidgets.QFrame):
         if rpm is not None:
             self.rpm.value.setText(rpm)
         self.note.setText(note)
+        self.note.setVisible(bool(note))
+        if changed and not isinstance(self.parent(), VideoPanel):
+            self.relayout()
         if changed and isinstance(self.parent(), VideoPanel):
             self.parent()._relayout()
 
@@ -275,6 +313,9 @@ class VideoPanel(QtWidgets.QWidget):
         top = y0 + (room - vh - sh) // 2
         video.setGeometry((W - vw) // 2, top, vw, vh)
         st.setGeometry(0, top + vh, W, sh)
+        st.relayout()
+        # and once more after Qt has handled the size changes it queued
+        QtCore.QTimer.singleShot(0, st.relayout)
 
     # ------------------------------------------------------- reference
     def _compare_toggled(self, on: bool):

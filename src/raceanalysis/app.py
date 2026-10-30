@@ -335,6 +335,24 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         for act in (self.act_find, self.act_remove, self.act_turns):
             act.setEnabled(has)
 
+    def rename_session(self, si: int):
+        """The session's start time became known (GPS or typed): give it its
+        short name everywhere, without rebuilding the tabs."""
+        if not 0 <= si < len(self.a.sessions):
+            return
+        s = self.a.sessions[si]
+        new = session_name(s.path)
+        if new == s.name:
+            return
+        s.name = new
+        self._fill_pickers()
+        self._info()
+        for p in self.pages:
+            if getattr(p, "names_changed", None):
+                p.names_changed()
+            elif p.title != "Day":
+                p.laps_changed()
+
     def _laps_changed(self):
         self._sync_pickers()
         for p in self.pages:
@@ -382,6 +400,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         settings().setValue("analysis/tab", i)
         page = self.tabs.widget(i)
+        self._size_to_current_tab()
         on = settings().value(f"analysis/video/{page.title}", page.video_default, type=bool)
         self.btn_video.blockSignals(True)
         self.btn_video.setChecked(on)
@@ -394,6 +413,17 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             corners._apply_loop()
         elif corners.title not in self._popouts:
             self.set_loop(None)
+
+    def _size_to_current_tab(self):
+        """A tab widget is normally as wide as its widest page, hidden ones
+        included, so one wide tab kept every tab from narrowing (and the
+        video from growing). Hidden pages stop counting toward its size."""
+        cur = self.tabs.currentWidget()
+        for j in range(self.tabs.count()):
+            w = self.tabs.widget(j)
+            pol = QtWidgets.QSizePolicy.Preferred if w is cur else QtWidgets.QSizePolicy.Ignored
+            w.setSizePolicy(pol, pol)
+        self.tabs.updateGeometry()
 
     def _set_video_visible(self, on: bool):
         page = self.tabs.currentWidget()
@@ -423,6 +453,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if page.title in self._popouts or self.tabs.count() <= 1:
             return
         self.tabs.removeTab(self.tabs.indexOf(page))
+        pol = QtWidgets.QSizePolicy.Preferred
+        page.setSizePolicy(pol, pol)        # its own window: size as usual
         w = PopOut(page, page.title)
         geo = settings().value(f"analysis/popout/{page.title}")
         if geo is None or not w.restoreGeometry(geo):
@@ -443,6 +475,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         idx = min(self.pages.index(page), self.tabs.count())
         self.tabs.insertTab(idx, page, page.title.replace("&", "&&"))
         page.show()
+        self._size_to_current_tab()
 
     def _show_page(self, page):
         if page.title in self._popouts:

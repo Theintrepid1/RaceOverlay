@@ -11,7 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from raceoverlay.syncgui import _note, settings
 
-from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
+from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, cap_columns, fmt_gap
 
 
 class CornersPage(QtWidgets.QWidget):
@@ -37,14 +37,17 @@ class CornersPage(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Sort"))
         self.sort = QtWidgets.QComboBox()
+        self.sort.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sort.setMinimumContentsLength(10)
         for txt, key in self.SORTS:
             self.sort.addItem(txt, key)
         i = self.sort.findData(settings().value("analysis/corner_sort", "track"))
         self.sort.setCurrentIndex(max(0, i))
         self.sort.currentIndexChanged.connect(self._sort_changed)
         row.addWidget(self.sort)
-        row.addSpacing(16)
-        self.loop = QtWidgets.QCheckBox("Loop the video on picked turns")
+        row.addSpacing(10)
+        self.loop = QtWidgets.QCheckBox("Loop picked turns")
         self.loop.setToolTip("Plays the picked turn (or run of turns) over and over, so you can "
                              "watch the dot trace the g-g. Shift-click to pick a run of turns.")
         self.loop.setChecked(settings().value("analysis/corner_loop", True, type=bool))
@@ -274,7 +277,7 @@ class CornersPage(QtWidgets.QWidget):
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(r, col, it)
         self._select_rows()
-        t.resizeColumnsToContents()
+        cap_columns(t)
         if self.split.orientation() == QtCore.Qt.Vertical:
             QtCore.QTimer.singleShot(0, self._arrange)
 

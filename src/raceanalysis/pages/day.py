@@ -16,7 +16,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from racecore import day
 from raceoverlay.syncgui import _btn, _note, settings
 
-from ..common import GAIN, INK_DIM, LIMIT, LOSS, NEUTRAL, SERIES, fmt_lap
+from ..common import GAIN, INK_DIM, LIMIT, LOSS, NEUTRAL, SERIES, cap_columns, fmt_lap
 
 
 def _scolor(i: int) -> str:
@@ -201,6 +201,17 @@ class DayPage(QtWidgets.QWidget):
     def laps_changed(self):
         pass
 
+    def names_changed(self):
+        """A session got its short name: update labels only (the notes form
+        may be mid-edit, so it isn't reloaded)."""
+        a = self.win.a
+        for si, s in enumerate(a.sessions):
+            it = self.sessions.item(si, 1)
+            if it is not None:
+                it.setText(s.name)
+        self._fill_pickers()
+        self._fill_turns()
+
     def cursor(self, d):
         pass
 
@@ -238,7 +249,7 @@ class DayPage(QtWidgets.QWidget):
                 if col in (3, 4, 5, 6):
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(si, col, it)
-        t.resizeColumnsToContents()
+        cap_columns(t)
         t.setColumnWidth(0, 8)
         t.horizontalHeader().setStretchLastSection(True)
         h = t.horizontalHeader().height() + sum(t.rowHeight(r) for r in range(t.rowCount())) + 6
@@ -476,6 +487,7 @@ class DayPage(QtWidgets.QWidget):
             self.saved_lbl.setText(f"Couldn't save: {e}")
         self.start_src.setText("typed in" if n.start_source == "typed" else
                                self.start_src.text())
+        self.win.rename_session(self.sel)
         self._fill_sessions_text(self.sel)
         if not n.weather and n.start_dt():
             self._fetch_weather(self.sel, quiet=True)
@@ -539,6 +551,7 @@ class DayPage(QtWidgets.QWidget):
             if isinstance(res, tuple) and not n.start:
                 n.start, n.start_source, n.start_utc = res
                 n.save(a.sessions[si].path)
+                self.win.rename_session(si)
                 self._fill_sessions_text(si)
                 if si == self.sel:
                     self._load_form()
@@ -554,6 +567,9 @@ class DayPage(QtWidgets.QWidget):
             if n.start_utc and off is not None:     # GPS time: now the exact local time
                 n.start = day.local_from_utc(n.start_utc, int(off))
             when = n.start_dt()
+            if when is not None:
+                n.save(a.sessions[si].path)
+                self.win.rename_session(si)
             if when is not None:
                 n.weather = day.weather_at(res, when)
                 n.save(a.sessions[si].path)
