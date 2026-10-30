@@ -9,6 +9,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
 
 from racecore import analysis
+from raceoverlay.syncgui import settings
 
 from ..common import CURSOR, GAIN, LOSS, REF_COLOR, SERIES
 from ..laplist import LapTree
@@ -74,13 +75,32 @@ class LapsPage(QtWidgets.QWidget):
         split.addWidget(left)
 
         side = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        maptop = QtWidgets.QWidget()
+        ml = QtWidgets.QVBoxLayout(maptop)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(2)
+        names = QtWidgets.QHBoxLayout()
+        names.addWidget(QtWidgets.QLabel("Turn names:"))
+        st = settings()
+        self.names_charts = QtWidgets.QCheckBox("Charts")
+        self.names_charts.setToolTip("Turn names along the top of the charts")
+        self.names_charts.setChecked(st.value("analysis/laps_names_charts", True, type=bool))
+        self.names_map = QtWidgets.QCheckBox("Map")
+        self.names_map.setToolTip("Turn names on the track map")
+        self.names_map.setChecked(st.value("analysis/laps_names_map", True, type=bool))
+        for chk in (self.names_charts, self.names_map):
+            chk.toggled.connect(self._names_toggled)
+            names.addWidget(chk)
+        names.addStretch(1)
+        ml.addLayout(names)
         self.map = pg.PlotWidget()
         self.map.setAspectLocked(True)
         self.map.hideAxis("left")
         self.map.hideAxis("bottom")
         self.map.setMenuEnabled(False)
         self.map.scene().sigMouseClicked.connect(self._map_clicked)
-        side.addWidget(self.map)
+        ml.addWidget(self.map, 1)
+        side.addWidget(maptop)
         self.laps = LapTree(compact=True)
         self.laps.focused.connect(win.lap_focused)
         self.laps.checked.connect(win.lap_checked)
@@ -93,6 +113,15 @@ class LapsPage(QtWidgets.QWidget):
         lay.addWidget(split)
         self.marker = None
         self.ref_marker = None
+
+    def _names_toggled(self, _on):
+        st = settings()
+        st.setValue("analysis/laps_names_charts", self.names_charts.isChecked())
+        st.setValue("analysis/laps_names_map", self.names_map.isChecked())
+        self._draw_traces()
+        self._draw_map()
+        self.cursor(self.win.cursor_d)
+        self.ref_cursor(self.win.ref_d)
 
     # ------------------------------------------------------------ updates
     def refresh(self):
@@ -221,7 +250,7 @@ class LapsPage(QtWidgets.QWidget):
         self.legend.setText("&nbsp;&nbsp;&nbsp;&nbsp;".join(parts))
         self.p_grip.setYRange(0, 115, padding=0)
         vr = self.p_speed.viewRange()[1]
-        for c in a.corners:
+        for c in (a.corners if self.names_charts.isChecked() else ()):
             t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 0))
             t.setPos(float(w.x(c.apex_d)), vr[1])
             self.p_speed.addItem(t, ignoreBounds=True)
@@ -277,7 +306,7 @@ class LapsPage(QtWidgets.QWidget):
                               symbolPen=None, symbolBrush=pg.mkBrush(col))
         else:
             self.map.plot(ref.xy[:, 0], ref.xy[:, 1], pen=pg.mkPen(REF_COLOR, width=2))
-        for c in a.corners:
+        for c in (a.corners if self.names_map.isChecked() else ()):
             px = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 0]))
             py = float(np.interp(c.apex_d, a._ref_s, ref.xy[:, 1]))
             t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 1.2))

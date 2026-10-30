@@ -295,6 +295,11 @@ def find(lat: float, lon: float, folder: Path | None = None) -> TrackProfile | N
 
 
 def name_from_file(path: str) -> str:
-    """'Virginia Intl Raceway Full' from an APEX Pro export name."""
-    m = re.search(r"_from_(.+?)_on_", Path(path).name)
-    return m.group(1).replace("_", " ") if m else "Track"
+    """'Virginia Intl Raceway Full' from an APEX Pro export name (any of its
+    three naming styles, see racecore.ingest)."""
+    name = Path(path).name
+    m = (re.search(r"[\s_]from[\s_]+(.+?)[\s_]+on[\s_]+\d", name)
+         or re.match(r"^(.+?)__\d{5,}\.csv$", name, re.IGNORECASE))
+    if not m:
+        return "Track"
+    return re.sub(r"\s+", " ", m.group(1).replace("_", " ")).strip()

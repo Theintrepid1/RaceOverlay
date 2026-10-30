@@ -22,11 +22,29 @@ MPH = 0.621371
 
 
 def session_name(path: str) -> str:
-    """'Session 2 · Sep 27' for APEX Pro exports, else the file name."""
-    lg = ingest.log_info(path) if Path(path).exists() else None
-    if lg and lg.session and ingest.APEX_DATE_RE.search(Path(path).name):
-        return f"Session {lg.session} · {lg.date:%b %d}"
-    return Path(path).stem
+    """Short name for a session, from what's known about when it ran:
+    'Session 2 · Sep 27' (APEX name with date and number), 'Sep 27 · 10:42'
+    (start time from the GoPro's GPS or typed on the Day tab), 'Log 812128378'
+    (APEX ID-style name, time not known yet), else the file name, shortened."""
+    from racecore import day
+    exists = Path(path).exists()
+    lg = ingest.log_info(path)
+    if lg.session and not lg.guessed:
+        return f"Session {lg.session} · {lg.date:%b} {lg.date.day}"
+    when = day.Notes.load(path).start_dt() if exists else None
+    if when is not None:
+        return f"{when:%b} {when.day} · {when:%H:%M}"
+    if not lg.guessed and lg.date:
+        return f"{lg.date:%b} {lg.date.day}"
+    lid = ingest.log_id(path)
+    if lid:
+        return f"Log {lid}"
+    return elide(Path(path).stem, 28)
+
+
+def elide(text: str, n: int) -> str:
+    """Cut text to n characters, ending in '…'."""
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
 def fmt_lap(s: float, decimals: int = 3) -> str:
@@ -38,3 +56,23 @@ def fmt_lap(s: float, decimals: int = 3) -> str:
 
 def fmt_gap(s: float) -> str:
     return f"{s:+.2f}"
+
+
+def cap_columns(table, max_px: int = 190):
+    """Size columns to their contents, but no column wider than max_px.
+    Cut-off cells end in '…' and show their full text on hover, and the
+    table scrolls sideways instead of widening the panel it sits in."""
+    from PySide6 import QtCore
+    table.resizeColumnsToContents()
+    table.setTextElideMode(QtCore.Qt.ElideRight)
+    table.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    fm = table.fontMetrics()
+    for col in range(table.columnCount()):
+        if table.columnWidth(col) <= max_px:
+            continue
+        table.setColumnWidth(col, max_px)
+        for row in range(table.rowCount()):
+            it = table.item(row, col)
+            if it is not None and not it.toolTip() and \
+                    fm.horizontalAdvance(it.text()) > max_px - 12:
+                it.setToolTip(it.text())

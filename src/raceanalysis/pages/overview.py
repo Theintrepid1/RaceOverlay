@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtWidgets
 
 from raceoverlay.syncgui import _btn, _note
 
+from .. import pointlabels
 from ..common import (INK, INK_DIM, INK_FAINT, LOSS, PANEL, PURPLE, REF_COLOR,
                       fmt_gap, fmt_lap)
 from ..laplist import LapTree
@@ -72,6 +73,7 @@ class _Card(QtWidgets.QFrame):
         self.v.setStyleSheet(f"color:{INK};")
         self.s = QtWidgets.QLabel("")
         self.s.setStyleSheet(f"color:{INK_DIM}; font-size:11px;")
+        self.s.setWordWrap(True)        # long lap names wrap, not widen the row
         for w in (self.t, self.v, self.s):
             lay.addWidget(w)
 
@@ -147,10 +149,14 @@ class OverviewPage(QtWidgets.QWidget):
         f.setBold(True)
         hello.setFont(f)
         el.addWidget(hello, 0, QtCore.Qt.AlignHCenter)
-        el.addWidget(_note("<b>At the track:</b> import the new recordings off the GoPro card; "
-                           "they're matched to your data files and synced.<br>"
-                           "<b>Later:</b> open a track day you imported before."),
-                     0, QtCore.Qt.AlignHCenter)
+        intro = _note("<b>At the track:</b> import the new recordings off the GoPro card; "
+                      "they're matched to your data files and synced.<br>"
+                      "<b>Later:</b> open a track day you imported before.")
+        # a centred wrapping label gets cut off unless its width and height
+        # are pinned (an aligned layout item doesn't ask height-for-width)
+        intro.setFixedWidth(460)
+        intro.setMinimumHeight(intro.heightForWidth(460))
+        el.addWidget(intro, 0, QtCore.Qt.AlignHCenter)
         brow = QtWidgets.QHBoxLayout()
         brow.addStretch(1)
         brow.addWidget(_btn("Import from GoPro card…", win.import_card, big=True))
@@ -190,6 +196,7 @@ class OverviewPage(QtWidgets.QWidget):
         self.chart.showGrid(y=True, alpha=0.15)
         self.chart.getAxis("bottom").enableAutoSIPrefix(False)
         self.chart.setLabel("left", "Lap time")
+        self.labels = pointlabels.PointLabels(self.chart)
         self.chart.scene().sigMouseClicked.connect(self._chart_clicked)
         rl.addWidget(self.chart, 3)
         self.loss_title = _note("")
@@ -276,6 +283,7 @@ class OverviewPage(QtWidgets.QWidget):
                 self.chart.plot(xs, ys, pen=pg.mkPen("#6b6a64", width=2))
             x += 0.6
         # dots on top: fastest purple, reference grey, picked laps in their colours
+        labels = []
         for bx, key in self._bars:
             ld = w.lap(key)
             if key == w.focus or key in w.compare:
@@ -290,10 +298,16 @@ class OverviewPage(QtWidgets.QWidget):
                 col = PURPLE
             self.chart.plot([bx], [ld.time], pen=None, symbol="o", symbolSize=size,
                             symbolPen=pg.mkPen("#0b0b0b", width=1.5), symbolBrush=pg.mkBrush(col))
+            important = (key == w.focus or key in w.compare or ld is a.ref
+                         or abs(ld.time - fastest) < 1e-9)
+            labels.append(pointlabels.Point(bx, ld.time, fmt_lap(ld.time), important,
+                                            tip=f"{w.label(ld)}  {fmt_lap(ld.time)}"))
         self.chart.getAxis("bottom").setTicks([ticks])
-        pad = max(0.5, (slowest - fastest) * 0.08)
-        self.chart.setYRange(fastest - pad, slowest + pad, padding=0)
+        pad = max(0.8, (slowest - fastest) * 0.14)       # room for labels below
+        top = max(0.8, (slowest - fastest) * 0.16)       # and above
+        self.chart.setYRange(fastest - pad, slowest + top, padding=0)
         self.chart.setXRange(-0.6, x - 0.4, padding=0)
+        self.labels.set(labels)
 
     def _chart_clicked(self, ev):
         if ev.button() != QtCore.Qt.LeftButton or not self._bars:

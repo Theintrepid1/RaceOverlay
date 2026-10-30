@@ -1,11 +1,27 @@
 # Roadmap
 
+## Next — planned (see the project's change list, batches C–F)
+- Laps tab charts: add/remove (1–6), any channel per chart
+- Track-defined sectors (turns editor, built-in tracks, thirds fallback)
+- Import: fix the GoPro's reset clock for a whole card at once (GPS-suggested)
+- Overlay: logo/image and text gauges; intro and end cards; separate app icons
+- Day tab: compare many sessions (consecutive / baseline) across several days
+
 ## Next — collecting ideas, not started
 - Interpolate the start/finish crossing (laps start up to one sample late)
 - Track database stage 2: public tracks repo + "Check for track updates"
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **Next release (in PR, not released yet):** Race Analysis bugs and polish.
+  APEX exports recognized in all three naming styles (short session names,
+  ID-only files dated from the GoPro's GPS or typed start); tabs no longer
+  held wide by other tabs; long table cells capped with a tooltip; readout
+  strip digits no longer clipped; g-g direction labels placed by the data;
+  smooth (antialiased) g-ball and track map on the overlay; lap-time and
+  g labels on the Overview and Day charts; turn-name toggles on the Laps
+  tab; Day tab start time and tire pressures as separate boxes with hot
+  gain; envelope numbers table and hover readout on the Day tab.
 - **v1.1.0** (2026-10-30): Windows (same code as Linux, per-user installer
   built by GitHub Actions on each release, unsigned); built-in track library
   shipped with the app (VIR Full Course), local overrides, Reset to built-in,

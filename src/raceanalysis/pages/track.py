@@ -39,7 +39,9 @@ class TrackPage(QtWidgets.QWidget):
         bar.addWidget(self.status, 1)
         bar.addWidget(QtWidgets.QLabel("Use"))
         self.pick = QtWidgets.QComboBox()
-        self.pick.setMinimumContentsLength(28)
+        self.pick.setMinimumContentsLength(16)
+        self.pick.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.pick.setToolTip("Saved tracks, nearest start line first. Pick another layout "
                              "at the same place, or start a new track.")
         self.pick.activated.connect(self._picked)

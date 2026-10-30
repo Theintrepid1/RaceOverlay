@@ -31,9 +31,15 @@ from . import osutil
 # G + H/X/L/P, 2-digit chapter, 4-digit recording, e.g. GH020123.MP4.
 CHAPTER_RE = re.compile(r"^(G[A-Z])(\d{2})(\d{4})(\.mp4)$", re.IGNORECASE)
 GOPRO_DIR_RE = re.compile(r"^\d{3}GOPRO$", re.IGNORECASE)
-# APEX Pro export names end like "..._on_09.27_1.2026.csv" (month.day_n.year)
-APEX_DATE_RE = re.compile(r"_on_(\d{1,2})\.(\d{1,2})(?:_(\d+))?\.(\d{4})\.csv$",
-                          re.IGNORECASE)
+# APEX Pro exports come named three ways (all from the same app):
+#   "APEX Pro Data (CSV) from Virginia Int'l Raceway (Full) on 09.27 (1).2026.csv"
+#   "APEX_Pro_Data_CSV_from_Virginia_Intl_Raceway_Full_on_09.27_1.2026.csv"
+#   "Virginia_Intl_Raceway_Full__812128378.csv"   (session ID, no date)
+# The CSVs themselves carry no date or clock time, only seconds from start.
+APEX_DATE_RE = re.compile(
+    r"(?:^|[\s_])on[\s_]+(\d{1,2})\.(\d{1,2})(?:[\s_]*\(?(\d+)\)?)?\.(\d{4})\.csv$",
+    re.IGNORECASE)
+APEX_ID_RE = re.compile(r"^(.+?)__(\d{5,})\.csv$", re.IGNORECASE)
 COPY_CHUNK = 8 << 20
 
 
@@ -61,8 +67,9 @@ class Clip:
 @dataclass
 class Log:
     path: str
-    date: dt.date | None        # recording date if the name or file says so
-    session: int | None = None  # APEX "_1" style session number
+    date: dt.date | None        # recording date if the name says so
+    session: int | None = None  # APEX "_1" / "(1)" style session number
+    guessed: bool = False       # date is only the file's modified time
 
 
 @dataclass
@@ -215,6 +222,9 @@ def import_clips(clips: list[Clip], library: str, progress=None, cancelled=None)
 # ------------------------------------------------------------------- logs ---
 
 def log_info(path: str) -> Log:
+    """Date and session number from an APEX Pro export name. Otherwise the
+    file's modified time, marked as a guess: copying or downloading a file
+    resets it, so it says nothing reliable about when it was recorded."""
     m = APEX_DATE_RE.search(Path(path).name)
     if m:
         mo, d, n, y = m.groups()
@@ -222,7 +232,17 @@ def log_info(path: str) -> Log:
             return Log(path, dt.date(int(y), int(mo), int(d)), int(n) if n else None)
         except ValueError:
             pass
-    return Log(path, dt.date.fromtimestamp(Path(path).stat().st_mtime))
+    try:
+        mtime = dt.date.fromtimestamp(Path(path).stat().st_mtime)
+    except OSError:
+        mtime = None
+    return Log(path, mtime, guessed=True)
+
+
+def log_id(path: str) -> str | None:
+    """APEX session ID from an ID-style export name, else None."""
+    m = APEX_ID_RE.match(Path(path).name)
+    return m.group(2) if m else None
 
 
 def find_logs(folder: str) -> list[Log]:
@@ -238,13 +258,17 @@ def find_logs(folder: str) -> list[Log]:
 
 
 def candidates(clip: Clip, logs: list[Log], window_days: int = 1) -> list[Log]:
-    """Logs from the clip's day (+-window_days for a wrong camera clock);
-    every log when the clip's date is unknown."""
+    """Logs from the clip's day (+-window_days for a wrong camera clock),
+    plus every log whose date is only a guess; every log when the clip's
+    date is unknown or nothing is near it."""
     if clip.recorded is None:
         return list(logs)
     d = clip.recorded.date()
-    near = [lg for lg in logs if lg.date and abs((lg.date - d).days) <= window_days]
-    return near or list(logs)
+    near = [lg for lg in logs if lg.guessed or
+            (lg.date and abs((lg.date - d).days) <= window_days)]
+    if not any(not lg.guessed for lg in near):
+        return list(logs)
+    return near
 
 
 def pair(clip: Clip, parts: list[tuple[str, float]], logs: list[Log],

@@ -11,7 +11,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from raceoverlay.syncgui import _note, settings
 
-from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, fmt_gap
+from .. import gglabels
+from ..common import CURSOR, LIMIT, GAIN, LOSS, NEUTRAL, REF_COLOR, cap_columns, fmt_gap
 
 
 class CornersPage(QtWidgets.QWidget):
@@ -37,14 +38,17 @@ class CornersPage(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Sort"))
         self.sort = QtWidgets.QComboBox()
+        self.sort.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.sort.setMinimumContentsLength(10)
         for txt, key in self.SORTS:
             self.sort.addItem(txt, key)
         i = self.sort.findData(settings().value("analysis/corner_sort", "track"))
         self.sort.setCurrentIndex(max(0, i))
         self.sort.currentIndexChanged.connect(self._sort_changed)
         row.addWidget(self.sort)
-        row.addSpacing(16)
-        self.loop = QtWidgets.QCheckBox("Loop the video on picked turns")
+        row.addSpacing(10)
+        self.loop = QtWidgets.QCheckBox("Loop picked turns")
         self.loop.setToolTip("Plays the picked turn (or run of turns) over and over, so you can "
                              "watch the dot trace the g-g. Shift-click to pick a run of turns.")
         self.loop.setChecked(settings().value("analysis/corner_loop", True, type=bool))
@@ -79,6 +83,7 @@ class CornersPage(QtWidgets.QWidget):
 
         self.gg = pg.PlotWidget()
         self.gg.setAspectLocked(True)
+        self.labels = gglabels.GGLabels(self.gg)
         self.gg.setMenuEnabled(False)
         for ax in ("left", "bottom"):
             self.gg.getAxis(ax).enableAutoSIPrefix(False)
@@ -250,9 +255,9 @@ class CornersPage(QtWidgets.QWidget):
             if best_ld is None or to_best < 0.005 or cr.best_key == ld.key:
                 best = "this lap"
             else:
-                best = f"L{best_ld.lap.n}  {to_best:.2f} quicker"
-                if len(a.sessions) > 1:
-                    best = f"{w.label(best_ld)}  {to_best:.2f} quicker"
+                # the gain first, so it still shows when a long lap name is cut
+                who = w.label(best_ld) if len(a.sessions) > 1 else f"L{best_ld.lap.n}"
+                best = f"{to_best:.2f} quicker · {who}"
             cells = [c.name + (f" ({c.direction})" if c.direction else ""),
                      "" if is_ref else fmt_gap(cr.lost), grip, vmin, brake, best]
             for col, txt in enumerate(cells):
@@ -274,7 +279,7 @@ class CornersPage(QtWidgets.QWidget):
                     it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
                 t.setItem(r, col, it)
         self._select_rows()
-        t.resizeColumnsToContents()
+        cap_columns(t)
         if self.split.orientation() == QtCore.Qt.Vertical:
             QtCore.QTimer.singleShot(0, self._arrange)
 
@@ -371,17 +376,9 @@ class CornersPage(QtWidgets.QWidget):
             self.gg.addItem(lbl)
         self.gg.plot([-R, R], [0, 0], pen=grid_pen)
         self.gg.plot([0, 0], [-R, R], pen=grid_pen)
-        e = R * 0.97
         kx, ky = self._k()
         self.gg.setLabel("bottom", "Lateral g")
         self.gg.setLabel("left", "Longitudinal g")
-        for txt, x, y, anc in (("Braking", 0, -e * ky, (0.5, 0 if ky > 0 else 1)),
-                               ("Accel", 0, e * ky, (0.5, 1 if ky > 0 else 0)),
-                               ("Left turn", -e * kx, 0, (0 if kx > 0 else 1, 1)),
-                               ("Right turn", e * kx, 0, (1 if kx > 0 else 0, 1))):
-            t = pg.TextItem(txt, color="#8a8983", anchor=anc)
-            t.setPos(x, y)
-            self.gg.addItem(t)
         if a.envelope is not None:
             o = a.envelope.outline()
             self.gg.plot(kx * o[:, 0], ky * o[:, 1], pen=pg.mkPen(LIMIT, width=2,
@@ -425,7 +422,10 @@ class CornersPage(QtWidgets.QWidget):
         self.marker = self.gg.plot([0], [0], pen=None, symbol="o", symbolSize=14,
                                    symbolPen=pg.mkPen(CURSOR, width=2),
                                    symbolBrush=pg.mkBrush(w.color(ld.key)))
-        self.gg.setRange(xRange=(-R, R), yRange=(-R, R), padding=0.02)
+        pts = [(lap.lat_g[lap.v > 30], lap.lon_g[lap.v > 30]) for lap in (a.ref, ld)
+               if lap is not None and lap.lat_g is not None and lap.lon_g is not None]
+        outl = [a.envelope.outline()] if a.envelope is not None else []
+        self.labels.set(gglabels.reach(pts, outl), kx, ky, R)
         self.cursor(w.cursor_d)
         self.ref_cursor(w.ref_d)
 

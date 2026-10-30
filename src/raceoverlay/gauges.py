@@ -341,6 +341,81 @@ def _ok(v) -> bool:
 
 # ------------------------------------------------------------------ gauges --
 
+# Pillow draws circles and lines without antialiasing, so the round gauges
+# (g-ball, track map) are drawn this many times larger and shrunk down.
+SUPERSAMPLE = 3
+
+
+class _Fine:
+    """A supersampled drawing layer over one box of a frame. Draw with
+    coordinates in frame pixels; finish() shrinks it and lays it on top."""
+
+    def __init__(self, f: "Frame", x: float, y: float, w: float, h: float):
+        self.f = f
+        self.x0, self.y0 = int(math.floor(x)), int(math.floor(y))
+        self.w = max(1, int(math.ceil(x + w)) - self.x0)
+        self.h = max(1, int(math.ceil(y + h)) - self.y0)
+        s = SUPERSAMPLE
+        self.img = Image.new("RGBA", (self.w * s, self.h * s), (0, 0, 0, 0))
+        self.d = ImageDraw.Draw(self.img)
+
+    def _xy(self, pts):
+        s = SUPERSAMPLE
+        return [((px - self.x0) * s, (py - self.y0) * s) for px, py in pts]
+
+    def ellipse(self, cx, cy, rx, ry=None, **kw):
+        ry = rx if ry is None else ry
+        (a, b), (c, d) = self._xy([(cx - rx, cy - ry), (cx + rx, cy + ry)])
+        if "width" in kw:
+            kw["width"] = max(1, int(round(kw["width"] * SUPERSAMPLE)))
+        self.d.ellipse([a, b, c, d], **kw)
+
+    def line(self, pts, width=1.0, **kw):
+        self.d.line(self._xy(pts), width=max(1, int(round(width * SUPERSAMPLE))), **kw)
+
+    def finish(self):
+        small = self.img.resize((self.w, self.h), Image.BOX)
+        # keep to the frame (a gauge dragged partly off the edge)
+        sx, sy = max(0, -self.x0), max(0, -self.y0)
+        ex = min(self.w, self.f.w - self.x0)
+        ey = min(self.h, self.f.h - self.y0)
+        if ex <= sx or ey <= sy:
+            return
+        self.f.img.alpha_composite(small, (self.x0 + sx, self.y0 + sy), (sx, sy, ex, ey))
+
+
+@functools.lru_cache(maxsize=16)
+def _gball_rings(w: int, h: int, k: float, ring, outline: float, outline_col):
+    """The g-ball's rings and crosshair, drawn once per size and style
+    (smoothly, via supersampling) and reused every frame."""
+    f = Frame.new(w, h)
+    label_h = 34 * k
+    r = min(w, h - label_h) / 2 - 12 * k
+    cx, cy = w / 2, (h - label_h) / 2 + 4 * k
+    lw = max(1.0, 3 * k)
+    fine = _Fine(f, 0, 0, w, h)
+    if outline:  # dark edge so the ring survives sky/concrete/white walls
+        e = max(1.0, outline * k * 0.6)
+        fine.ellipse(cx, cy, r + e, outline=outline_col, width=lw + 2 * e)
+        fine.ellipse(cx, cy, r / 2 + e, outline=outline_col, width=max(1.0, 2 * k) + 2 * e)
+    fine.ellipse(cx, cy, r, outline=ring, width=lw)
+    fine.ellipse(cx, cy, r / 2, outline=ring, width=max(1.0, 2 * k))
+    faint = ring[:3] + (ring[3] // 2,)
+    cw = max(1.0, 1.2 * k)
+    fine.line([(cx - r, cy), (cx + r, cy)], fill=faint, width=cw)
+    fine.line([(cx, cy - r), (cx, cy + r)], fill=faint, width=cw)
+    fine.finish()
+    return f.img
+
+
+def _dot(f: Frame, px: float, py: float, d: float, **kw):
+    """One smooth dot (only its own few pixels are supersampled)."""
+    pad = d + 2 + kw.get("width", 0)
+    fine = _Fine(f, px - pad, py - pad, 2 * pad, 2 * pad)
+    fine.ellipse(px, py, d, **kw)
+    fine.finish()
+
+
 def draw_gball(f: Frame, box, st: Style, lat, lon, trail=(), g_range=1.5):
     """lat: + = dot right. lon: + = dot up. Caller applies any inversion."""
     if not _ok(lat) and not _ok(lon):
@@ -351,22 +426,15 @@ def draw_gball(f: Frame, box, st: Style, lat, lon, trail=(), g_range=1.5):
     lon = lon if _ok(lon) else 0.0
     label_h = 34 * k
     r = min(w, h - label_h) / 2 - 12 * k
-    cx = x + w / 2
-    cy = y + (h - label_h) / 2 + 4 * k
-    lw = max(1, int(3 * k))
-    if st.outline:  # dark edge so the ring survives sky/concrete/white walls
-        e = max(1, int(st.outline * k * 0.6))
-        f.draw.ellipse([cx - r - e, cy - r - e, cx + r + e, cy + r + e],
-                       outline=st.outline_col, width=lw + 2 * e)
-        f.draw.ellipse([cx - r / 2 - e, cy - r / 2 - e, cx + r / 2 + e,
-                        cy + r / 2 + e], outline=st.outline_col,
-                       width=max(1, int(2 * k)) + 2 * e)
-    f.draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=st.ring, width=lw)
-    f.draw.ellipse([cx - r / 2, cy - r / 2, cx + r / 2, cy + r / 2],
-                   outline=st.ring, width=max(1, int(2 * k)))
-    faint = st.ring[:3] + (st.ring[3] // 2,)
-    f.draw.line([cx - r, cy, cx + r, cy], fill=faint, width=1)
-    f.draw.line([cx, cy - r, cx, cy + r], fill=faint, width=1)
+    x0, y0 = int(x), int(y)
+    cx = x0 + int(w) / 2
+    cy = y0 + (int(h) - label_h) / 2 + 4 * k
+    rings = _gball_rings(int(w), int(h), round(k, 4), tuple(st.ring), st.outline,
+                         tuple(st.outline_col) if st.outline_col else None)
+    sx, sy = max(0, -x0), max(0, -y0)
+    ex, ey = min(rings.width, f.w - x0), min(rings.height, f.h - y0)
+    if ex > sx and ey > sy:
+        f.img.alpha_composite(rings, (x0 + sx, y0 + sy), (sx, sy, ex, ey))
 
     def pos(la, lo):
         return (cx + max(-1.0, min(1.0, la / g_range)) * r,
@@ -378,31 +446,30 @@ def draw_gball(f: Frame, box, st: Style, lat, lon, trail=(), g_range=1.5):
             continue
         px, py = pos(la, lo)
         a = int(40 + 140 * (i + 1) / (n + 1))
-        d = (3 + 3 * (i + 1) / (n + 1)) * k
-        f.draw.ellipse([px - d, py - d, px + d, py + d],
-                       fill=st.accent[:3] + (a,))
+        _dot(f, px, py, (3 + 3 * (i + 1) / (n + 1)) * k, fill=st.accent[:3] + (a,))
     px, py = pos(lat, lon)
-    d = 10 * k
-    f.draw.ellipse([px - d, py - d, px + d, py + d], fill=st.accent,
-                   outline=(0, 0, 0, 160), width=max(1, int(2 * k)))
+    _dot(f, px, py, 10 * k, fill=st.accent, outline=(0, 0, 0, 160), width=max(1.0, 2 * k))
     _text(f, (cx, y + h - 8 * k), f"{math.hypot(lat, lon):.2f} g",
           _font(22 * k, st.font), st.fg, st, k, anchor="ms")
 
 
 def track_image(path_xy, w: int, h: int, k: float, st: Style) -> Image.Image:
     """Pre-render the track outline once per size/style (drawing ~10k
-    points every frame is wasted work)."""
-    img = Image.new("RGBA", (max(1, int(w)), max(1, int(h))), (0, 0, 0, 0))
+    points every frame is wasted work). Drawn larger and shrunk so the
+    line is smooth."""
+    s = SUPERSAMPLE
+    W, H = max(1, int(w)), max(1, int(h))
+    img = Image.new("RGBA", (W * s, H * s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     inset = 18 * k
-    pts = [(inset + p[0] * (w - 2 * inset), inset + p[1] * (h - 2 * inset))
+    pts = [((inset + p[0] * (w - 2 * inset)) * s, (inset + p[1] * (h - 2 * inset)) * s)
            for p in path_xy]
-    width = max(2, int(3 * k))
+    width = max(2.0, 3 * k)
     if st.outline:
-        d.line(pts, fill=st.outline_col, width=width + 2 * max(1, int(k * 2)),
-               joint="curve")
-    d.line(pts, fill=st.track, width=width, joint="curve")
-    return img
+        ow = width + 2 * max(1.0, k * 2)
+        d.line(pts, fill=st.outline_col, width=max(1, int(round(ow * s))), joint="curve")
+    d.line(pts, fill=st.track, width=max(1, int(round(width * s))), joint="curve")
+    return img.resize((W, H), Image.LANCZOS)
 
 
 def draw_map(f: Frame, box, st: Style, track_img: Image.Image, cur_xy):
@@ -413,9 +480,8 @@ def draw_map(f: Frame, box, st: Style, track_img: Image.Image, cur_xy):
         inset = 18 * k
         cx = x + inset + cur_xy[0] * (w - 2 * inset)
         cy = y + inset + cur_xy[1] * (h - 2 * inset)
-        d = 9 * k
-        f.draw.ellipse([cx - d, cy - d, cx + d, cy + d], fill=st.accent,
-                       outline=(0, 0, 0, 200), width=max(1, int(2 * k)))
+        _dot(f, cx, cy, 9 * k, fill=st.accent, outline=(0, 0, 0, 200),
+             width=max(1.0, 2 * k))
 
 
 def draw_edit_boxes(f: Frame, boxes: dict, names, active: str | None = None,
