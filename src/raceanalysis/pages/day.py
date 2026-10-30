@@ -16,7 +16,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from racecore import day
 from raceoverlay.syncgui import _btn, _note, settings
 
-from .. import gglabels
+from .. import fields, gglabels, pointlabels
 from ..common import GAIN, INK_DIM, LIMIT, LOSS, NEUTRAL, SERIES, cap_columns, fmt_lap
 
 
@@ -92,10 +92,32 @@ class DayPage(QtWidgets.QWidget):
         self.env = pg.PlotWidget()
         self.env.setAspectLocked(True)
         self.env_labels = gglabels.GGLabels(self.env, which=("accel", "brake"))
+        self.env_hover = pg.TextItem("", color="#d8d7d0", fill=pg.mkBrush(23, 23, 26, 230),
+                                     border=pg.mkPen("#3a3a37"), anchor=(0, 1))
+        self.env_hover.setZValue(100)
+        self.env_ray = pg.PlotDataItem(pen=pg.mkPen("#f2f1ec", width=1,
+                                                    style=QtCore.Qt.DotLine))
+        self.env.scene().sigMouseMoved.connect(self._env_hover)
         self.env.setMenuEnabled(False)
         self.env.hideAxis("left")
         self.env.hideAxis("bottom")
-        mid.addWidget(self.env)
+        envbox = QtWidgets.QWidget()
+        el = QtWidgets.QVBoxLayout(envbox)
+        el.setContentsMargins(0, 0, 0, 0)
+        el.setSpacing(2)
+        el.addWidget(self.env, 1)
+        # the outlines in numbers: how far each session went each way
+        self.env_table = QtWidgets.QTableWidget(0, 5)
+        self.env_table.setHorizontalHeaderLabels(["", "Brake", "Accel", "Left", "Right"])
+        self.env_table.verticalHeader().setVisible(False)
+        self.env_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.env_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.env_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.env_table.setToolTip("Each session's grip envelope in the four directions, in g. "
+                                  "The best in each column is highlighted. Hover the chart "
+                                  "for any direction in between.")
+        el.addWidget(self.env_table)
+        mid.addWidget(envbox)
         mid.setSizes([520, 380])
         ll.addWidget(mid, 3)
 
@@ -107,6 +129,7 @@ class DayPage(QtWidgets.QWidget):
         for ax in ("left", "bottom"):
             self.trend.getAxis(ax).enableAutoSIPrefix(False)
         self.trend.setLabel("left", "g (95th pct)")
+        self.trend_labels = pointlabels.PointLabels(self.trend)
         ll.addWidget(self.trend, 2)
         split.addWidget(left)
 
@@ -118,8 +141,7 @@ class DayPage(QtWidgets.QWidget):
         self.form_title.setStyleSheet("font-weight:600;")
         fl.addWidget(self.form_title)
         form = QtWidgets.QFormLayout()
-        self.f_start = QtWidgets.QLineEdit()
-        self.f_start.setPlaceholderText("YYYY-MM-DD HH:MM (track time)")
+        self.f_start = fields.StartFields()
         self.start_src = _note("", small=True)
         sw = QtWidgets.QWidget()
         sl = QtWidgets.QVBoxLayout(sw)
@@ -128,12 +150,8 @@ class DayPage(QtWidgets.QWidget):
         sl.addWidget(self.f_start)
         sl.addWidget(self.start_src)
         form.addRow("Start", sw)
-        self.f_cold = QtWidgets.QLineEdit()
-        self.f_cold.setPlaceholderText("FL/FR/RL/RR, e.g. 28/28/27/27")
-        form.addRow("Pressures cold", self.f_cold)
-        self.f_hot = QtWidgets.QLineEdit()
-        self.f_hot.setPlaceholderText("FL/FR/RL/RR after the session")
-        form.addRow("Pressures hot", self.f_hot)
+        self.f_press = fields.PressureGrid()
+        form.addRow("Pressures", self.f_press)
         self.f_track = QtWidgets.QLineEdit()
         self.f_track.setPlaceholderText("e.g. 110 F, from a pyrometer or the timing board")
         form.addRow("Track temp", self.f_track)
@@ -163,8 +181,10 @@ class DayPage(QtWidgets.QWidget):
         self.saved_lbl = _note("", small=True)
         fl.addWidget(self.saved_lbl)
         fl.addStretch(1)
-        for w in (self.f_start, self.f_cold, self.f_hot, self.f_track, self.f_tires, self.f_fuel):
+        for w in (self.f_track, self.f_tires, self.f_fuel):
             w.textEdited.connect(self._edited)
+        self.f_start.edited.connect(self._edited)
+        self.f_press.edited.connect(self._edited)
         for w in (self.f_changes, self.f_text):
             w.textChanged.connect(self._edited)
         form_w.setMinimumWidth(320)
@@ -224,7 +244,7 @@ class DayPage(QtWidgets.QWidget):
     def _fill_sessions(self):
         a, w = self.win.a, self.win
         t = self.sessions
-        cols = ["", "Session", "Start", "Laps", "Best", "Cornering g", "Braking g",
+        cols = ["", "Session", "Start", "Laps", "Best", "Corner\ng", "Brake\ng",
                 "Air", "Track", "Changes"]
         t.setColumnCount(len(cols))
         t.setHorizontalHeaderLabels(cols)
@@ -253,9 +273,22 @@ class DayPage(QtWidgets.QWidget):
                 t.setItem(si, col, it)
         cap_columns(t)
         t.setColumnWidth(0, 8)
+        # the g columns fit their numbers (plus padding), with two-line headers
+        hdr = t.horizontalHeader()
+        hfm = QtGui.QFontMetrics(hdr.font())
+        g_w = max(t.fontMetrics().horizontalAdvance("8.88"),
+                  hfm.horizontalAdvance("Corner")) + 18
+        for col, tip in ((5, "Cornering g: the session's grip envelope, left and right "
+                             "averaged"),
+                         (6, "Braking g: the session's grip envelope, straight-line braking")):
+            t.setColumnWidth(col, g_w)
+            hi = t.horizontalHeaderItem(col)
+            if hi is not None:
+                hi.setToolTip(tip)
         t.horizontalHeader().setStretchLastSection(True)
-        h = t.horizontalHeader().height() + sum(t.rowHeight(r) for r in range(t.rowCount())) + 6
-        t.setFixedHeight(min(max(h, 60), 220))
+        hh = max(t.horizontalHeader().height(), t.horizontalHeader().sizeHint().height())
+        h = hh + sum(t.rowHeight(r) for r in range(t.rowCount())) + 6
+        t.setFixedHeight(min(max(h, 60), 240))
         t.blockSignals(True)
         t.selectRow(self.sel)
         t.blockSignals(False)
@@ -354,17 +387,106 @@ class DayPage(QtWidgets.QWidget):
         if a.envelope is not None:
             outl.append(a.envelope.outline())
         self.env_labels.set(gglabels.reach((), outl), kx, ky, R)
+        self._env_k = (kx, ky)
+        for it in (self.env_hover, self.env_ray):
+            p.addItem(it, ignoreBounds=True)
+            it.hide()
+        self._fill_env_table()
+
+    # direction name, angle of the envelope (unflipped: +lat right, +lon accel)
+    ENV_DIRS = (("Brake", 1.5 * np.pi), ("Accel", 0.5 * np.pi), ("Left", np.pi), ("Right", 0.0))
+
+    def _fill_env_table(self):
+        a, t = self.win.a, self.env_table
+        rows = [(si, e) for si, e in enumerate(self.envs) if e is not None]
+        t.setRowCount(len(rows))
+        vals = np.array([[float(e.at(th)) for _, th in self.ENV_DIRS] for _, e in rows]) \
+            if rows else np.zeros((0, 4))
+        best = vals.max(axis=0) if len(rows) > 1 else None
+        for r, (si, e) in enumerate(rows):
+            sw = QtWidgets.QTableWidgetItem("")
+            sw.setBackground(QtGui.QColor(_scolor(si)))
+            sw.setToolTip(a.sessions[si].name)
+            t.setItem(r, 0, sw)
+            for c in range(4):
+                v = vals[r, c]
+                it = QtWidgets.QTableWidgetItem(f"{v:.2f}")
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                it.setToolTip(f"{a.sessions[si].name}: {self.ENV_DIRS[c][0].lower()} {v:.2f} g")
+                if best is not None and v >= best[c] - 1e-9:
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                    it.setForeground(QtGui.QColor(GAIN))
+                t.setItem(r, c + 1, it)
+        t.resizeColumnsToContents()
+        t.setColumnWidth(0, 10)
+        h = t.horizontalHeader().height() + sum(t.rowHeight(r) for r in range(t.rowCount())) + 4
+        t.setFixedHeight(min(h, 200))
+        t.setVisible(bool(rows))
+
+    def _env_hover(self, pos):
+        """Each session's grip in the direction under the mouse."""
+        vb = self.env.getViewBox()
+        rows = [(si, e) for si, e in enumerate(getattr(self, "envs", [])) if e is not None]
+        if not rows or not vb.sceneBoundingRect().contains(pos):
+            self.env_hover.hide()
+            self.env_ray.hide()
+            return
+        m = vb.mapSceneToView(pos)
+        kx, ky = getattr(self, "_env_k", (1.0, 1.0))
+        lat, lon = m.x() * kx, m.y() * ky          # back to unflipped
+        if np.hypot(lat, lon) < 0.08:
+            self.env_hover.hide()
+            self.env_ray.hide()
+            return
+        th = float(np.arctan2(lon, lat))
+        side = "right" if lat > 0 else "left"
+        if abs(lon) > 2.5 * abs(lat):
+            what = "braking" if lon < 0 else "accelerating"
+        elif abs(lat) > 2.5 * abs(lon):
+            what = f"cornering {side}"
+        else:
+            what = ("braking" if lon < 0 else "accelerating") + f" + {side}"
+        a = self.win.a
+        lines = [f"<b>{what}</b>"]
+        rmax = 0.0
+        for si, e in rows:
+            r = float(e.at(th))
+            rmax = max(rmax, r)
+            lines.append(f"<span style='color:{_scolor(si)}'>■</span> "
+                         f"{a.sessions[si].name}: {r:.2f} g")
+        self.env_hover.setHtml("<br>".join(lines))
+        self.env_hover.setAnchor((1.05 if m.x() > 0 else -0.05, 1.05 if m.y() < 0 else -0.05))
+        self.env_hover.setPos(m.x(), m.y())
+        ux, uy = kx * np.cos(th), ky * np.sin(th)
+        self.env_ray.setData([0, ux * rmax * 1.08], [0, uy * rmax * 1.08])
+        self.env_hover.show()
+        self.env_ray.show()
 
     def _draw_trend(self):
         p = self.trend
         p.clear()
         x = 0
         ticks = []
+        pts = []
+        w, a = self.win, self.win.a
+        picked = {k for k in [w.focus] + list(w.compare) if k is not None}
         for si, rows in enumerate(self.peaks):
             if not rows:
                 continue
             xs = np.arange(x, x + len(rows))
             col = _scolor(si)
+            laps = {ld.lap.n: ld for ld in a.laps if ld.session == si and ld.timed}
+            best = min(laps.values(), key=lambda ld: ld.time, default=None)
+            for xx, (n, cg, bg) in zip(xs, rows):
+                ld = laps.get(n)
+                imp = ld is not None and (ld is best or ld.key in picked)
+                name = f"{a.sessions[si].name} L{n}"
+                pts.append(pointlabels.Point(float(xx), cg, f"{cg:.2f}", imp,
+                                             tip=f"{name}: cornering {cg:.2f} g"))
+                pts.append(pointlabels.Point(float(xx), bg, f"{bg:.2f}", label=False,
+                                             tip=f"{name}: braking {bg:.2f} g"))
             p.plot(xs, [r[1] for r in rows], pen=pg.mkPen(col, width=2), symbol="o",
                    symbolSize=6, symbolBrush=pg.mkBrush(col), symbolPen=None)
             p.plot(xs, [r[2] for r in rows], pen=pg.mkPen(col, width=1.2,
@@ -377,6 +499,10 @@ class DayPage(QtWidgets.QWidget):
         p.getAxis("bottom").setTicks([ticks])
         if x:
             p.setXRange(-0.5, x - 1.5, padding=0.02)
+            ys = [q.y for q in pts]
+            span = max(ys) - min(ys) if ys else 0.0
+            p.setYRange(min(ys) - span * 0.12 - 0.02, max(ys) + span * 0.14 + 0.02, padding=0)
+        self.trend_labels.set(pts)
         p.setTitle("<span style='font-size:9pt'>Lap by lap: cornering g (solid), "
                    "braking g (dashed)</span>")
         p.setToolTip("95th percentile of cornering and braking g on each timed lap. "
@@ -388,13 +514,14 @@ class DayPage(QtWidgets.QWidget):
         a = self.win.a
         self._loading = True
         has = bool(a.sessions)
-        for w in (self.f_start, self.f_cold, self.f_hot, self.f_track, self.f_tires,
+        for w in (self.f_start, self.f_press, self.f_track, self.f_tires,
                   self.f_fuel, self.f_changes, self.f_text, self.btn_weather):
             w.setEnabled(has)
         if not has:
             self.form_title.setText("Session notes")
-            for w in (self.f_start, self.f_cold, self.f_hot, self.f_track, self.f_tires,
-                      self.f_fuel):
+            self.f_start.setText("")
+            self.f_press.set_values("", "")
+            for w in (self.f_track, self.f_tires, self.f_fuel):
                 w.setText("")
             self.f_changes.setPlainText("")
             self.f_text.setPlainText("")
@@ -411,8 +538,7 @@ class DayPage(QtWidgets.QWidget):
                                 "video": "from the GoPro's clock (check it was set)",
                                 "typed": "typed in"}.get(n.start_source,
                                                           "type it in, or sync the video"))
-        self.f_cold.setText(n.pressures_cold)
-        self.f_hot.setText(n.pressures_hot)
+        self.f_press.set_values(n.pressures_cold, n.pressures_hot)
         self.f_track.setText(n.track_temp)
         self.f_tires.setText(n.tires)
         self.f_fuel.setText(n.fuel)
@@ -469,12 +595,11 @@ class DayPage(QtWidgets.QWidget):
         if not self.notes or self.sel >= len(a.sessions):
             return
         n = self.notes[self.sel]
-        start = self.f_start.text().strip()
-        if start != n.start:
+        start = self.f_start.text()
+        if start != n.start and self.f_start.complete():
             n.start, n.start_source, n.start_utc = start, "typed", ""
             n.weather = {}            # different time: look it up again
-        n.pressures_cold = self.f_cold.text().strip()
-        n.pressures_hot = self.f_hot.text().strip()
+        n.pressures_cold, n.pressures_hot = self.f_press.values()
         n.track_temp = self.f_track.text().strip()
         n.tires = self.f_tires.text().strip()
         n.fuel = self.f_fuel.text().strip()
