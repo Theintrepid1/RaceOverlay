@@ -42,15 +42,19 @@ def _gpmd_stream_index(path: str) -> int | None:
     return None
 
 
-def _packets(path: str, index: int) -> list[tuple[float, float, bytes]]:
-    """(start_s, duration_s, payload) for each gpmd packet."""
+def _packets(path: str, index: int, max_s: float | None = None
+             ) -> list[tuple[float, float, bytes]]:
+    """(start_s, duration_s, payload) for each gpmd packet (only the first
+    max_s seconds when given: much quicker on a long file on an SD card)."""
+    lim = ["-read_intervals", f"%+{max_s:g}"] if max_s else []
     meta = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", str(index),
+        ["ffprobe", "-v", "error", "-select_streams", str(index), *lim,
          "-show_entries", "packet=pts_time,duration_time,size", "-of", "json",
          path], capture_output=True, text=True, check=True).stdout
     pkts = json.loads(meta)["packets"]
     raw = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", path, "-map", f"0:{index}",
+         *(["-t", f"{max_s:g}"] if max_s else []),
          "-c", "copy", "-f", "data", "-"],
         capture_output=True, check=True).stdout
     out, pos = [], 0
@@ -177,13 +181,13 @@ def _gps_time_in(packets):
     return None
 
 
-def gps_time(path: str):
+def gps_time(path: str, max_s: float | None = None):
     """(video seconds, UTC datetime) from a GoPro MP4's GPS clock, or None
-    (GPS off, no fix, or no gpmd track)."""
+    (GPS off, no fix, or no gpmd track). max_s: only look that far in."""
     index = _gpmd_stream_index(path)
     if index is None:
         return None
-    return _gps_time_in(_packets(path, index))
+    return _gps_time_in(_packets(path, index, max_s))
 
 
 def gps_time_dump(path: str, packet_s: float = 1.001):

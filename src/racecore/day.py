@@ -47,7 +47,7 @@ FORECAST_PAST_DAYS = 90       # the forecast API serves roughly the last 3 month
 @dataclass
 class Notes:
     start: str = ""              # session start, local track time "YYYY-MM-DD HH:MM"
-    start_source: str = ""       # "gps", "video", "typed"
+    start_source: str = ""       # "gps", "fixed", "video", "typed"
     start_utc: str = ""          # ISO UTC, when known exactly (GPS)
     pressures_cold: str = ""     # e.g. "30/30/28/28" (FL/FR/RL/RR)
     pressures_hot: str = ""
@@ -117,6 +117,10 @@ def find_start(video: tuple[list[str], float] | None, lat: float, lon: float
         start_utc = utc - dt.timedelta(seconds=vt + off)
         local = start_utc.astimezone(_local_tz(lon)).replace(tzinfo=None)
         return local.strftime("%Y-%m-%d %H:%M"), "gps", start_utc.isoformat()
+    from . import ingest
+    rec, fix = ingest.recorded_for(parts)
+    if rec is not None and fix:          # the camera clock, corrected at import
+        return (rec - dt.timedelta(seconds=off)).strftime("%Y-%m-%d %H:%M"), "fixed", ""
     c = _video_creation(parts[0])
     if c is not None:
         return (c - dt.timedelta(seconds=off)).strftime("%Y-%m-%d %H:%M"), "video", ""

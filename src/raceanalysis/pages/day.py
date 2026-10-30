@@ -535,6 +535,7 @@ class DayPage(QtWidgets.QWidget):
                                 f"Notes: {s.name}")
         self.f_start.setText(n.start)
         self.start_src.setText({"gps": "from the GoPro's GPS clock",
+                                "fixed": "from the GoPro's clock, corrected at import",
                                 "video": "from the GoPro's clock (check it was set)",
                                 "typed": "typed in"}.get(n.start_source,
                                                           "type it in, or sync the video"))
