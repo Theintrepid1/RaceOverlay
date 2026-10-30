@@ -34,7 +34,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 echo Installing Python packages ...
 ".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q --upgrade pip || goto :fail
-".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt py7zr || goto :fail
+".venv\Scripts\python.exe" -m pip install --disable-pip-version-check -q -r requirements.txt || goto :fail
 ".venv\Scripts\python.exe" packaging\windows\fetch_deps.py || goto :fail
 
 echo.

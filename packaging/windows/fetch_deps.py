@@ -13,7 +13,9 @@ installer build. Run it with the project's Python:
 
     python packaging/windows/fetch_deps.py [--dest DIR] [--force]
 
-Needs py7zr (pip install py7zr) because the mpv builds ship as .7z.
+The mpv builds ship as .7z using the BCJ2 filter, which Python's 7z
+libraries can't unpack, so this also fetches 7-Zip's own standalone
+extractor (7zr.exe, from the official 7-Zip releases) and uses that.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import io
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -33,6 +36,10 @@ FFMPEG_URL = ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
               "ffmpeg-n8.1-latest-win64-gpl-8.1.zip")
 MPV_API = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
 MPV_ASSET = re.compile(r"^mpv-dev-x86_64-\d{8}-git-[0-9a-f]+\.7z$")
+SEVENZR_URLS = (  # "latest" first; the pinned one is the fallback
+    "https://github.com/ip7z/7zip/releases/latest/download/7zr.exe",
+    "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
+)
 UA = {"User-Agent": "raceoverlay-fetch-deps"}
 
 
@@ -80,20 +87,40 @@ def mpv_asset_url() -> tuple[str, str]:
                        f"latest release ({rel.get('tag_name')})")
 
 
+def _sevenzr(tmp: Path) -> list[str]:
+    """Command to run a 7-Zip console extractor: one already installed
+    (7z/7zr on PATH), else the standalone 7zr.exe downloaded into tmp."""
+    for name in ("7zr", "7z", "7za"):
+        exe = shutil.which(name)
+        if exe:
+            return [exe]
+    last = None
+    for url in SEVENZR_URLS:
+        try:
+            exe = tmp / "7zr.exe"
+            exe.write_bytes(_get(url, "7-Zip extractor (7zr.exe, under 1 MB)"))
+            return [str(exe)]
+        except OSError as e:
+            last = e
+    raise RuntimeError(f"couldn't download 7zr.exe: {last}")
+
+
 def fetch_mpv(dest: Path):
-    try:
-        import py7zr
-    except ImportError:
-        sys.exit("py7zr is missing: pip install py7zr")
     name, url = mpv_asset_url()
     data = _get(url, f"libmpv ({name})")
     with tempfile.TemporaryDirectory() as tmp:
-        with py7zr.SevenZipFile(io.BytesIO(data)) as z:
-            want = [n for n in z.getnames() if Path(n).name.lower() == "libmpv-2.dll"]
-            if not want:
-                raise RuntimeError(f"libmpv-2.dll not found in {name}")
-            z.extract(path=tmp, targets=want)
-        shutil.copy2(Path(tmp) / want[0], dest / "libmpv-2.dll")
+        tmp = Path(tmp)
+        arc = tmp / name
+        arc.write_bytes(data)
+        out = tmp / "out"
+        # e = extract without folder structure; -r searches subfolders
+        cmd = _sevenzr(tmp) + ["e", str(arc), f"-o{out}", "libmpv-2.dll", "-r", "-y"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        dll = out / "libmpv-2.dll"
+        if r.returncode != 0 or not dll.exists():
+            raise RuntimeError(f"extracting libmpv-2.dll from {name} failed:\n"
+                               + (r.stdout + r.stderr).strip()[-800:])
+        shutil.copy2(dll, dest / "libmpv-2.dll")
     (dest / "mpv-VERSION.txt").write_text(name + "\n", encoding="utf-8")
 
 
