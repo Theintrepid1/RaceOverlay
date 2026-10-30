@@ -47,6 +47,14 @@ class TrackPage(QtWidgets.QWidget):
         self.btn_new = _btn("Save as new track…", self._save_new,
                             "Save these turns as a separate track (another layout here)")
         bar.addWidget(self.btn_new)
+        self.btn_reset = _btn("Reset to built-in", self._reset,
+                              "Drop this machine's edits and go back to the track as "
+                              "shipped with the app")
+        bar.addWidget(self.btn_reset)
+        self.btn_export = _btn("Export for sharing…", self._export,
+                               "Save a copy (turns and start line, no map image) to "
+                               "add to the app's built-in track library")
+        bar.addWidget(self.btn_export)
         lay.addLayout(bar)
         self.editor = TurnsEditor()
         self.editor.saved.connect(self._saved)
@@ -65,6 +73,9 @@ class TrackPage(QtWidgets.QWidget):
         self.empty.setVisible(not has)
         for w in (self.pick, self.btn_new):
             w.setEnabled(has)
+        p = a.profile if has else None
+        self.btn_reset.setVisible(bool(p is not None and p.edited))
+        self.btn_export.setEnabled(p is not None and bool(p.turns))
         if not has:
             self._key = None
             self.status.setText("")
@@ -98,8 +109,10 @@ class TrackPage(QtWidgets.QWidget):
                                 "Load the track map and place the turns, then Save." + dirty)
         else:
             n = len(p.turns)
+            where = ("built-in" if p.builtin else
+                     "built-in, edited on this computer" if p.edited else "saved on this computer")
             self.status.setText(
-                f"<b>{p.name}</b>: {n} turn{'s' if n != 1 else ''}, start line "
+                f"<b>{p.name}</b> ({where}): {n} turn{'s' if n != 1 else ''}, start line "
                 f"{_dist_m(p, lat, lon):.0f} m from this session's. "
                 f"<span style='color:#8a8983'>{p.path or ''}</span>" + dirty)
 
@@ -113,7 +126,8 @@ class TrackPage(QtWidgets.QWidget):
         cur = a.profile.path if a.profile is not None else None
         for d, p in near:
             far = f"{d / 1000:.0f} km" if d >= 1000 else f"{d:.0f} m"
-            self.pick.addItem(f"{p.name}  ({far} away)", p.path)
+            tag = "  · built-in" if p.builtin else "  · edited" if p.edited else ""
+            self.pick.addItem(f"{p.name}  ({far} away){tag}", p.path)
         self.pick.addItem("New track…", "__new__")
         i = next((j for j in range(self.pick.count()) if self.pick.itemData(j) == cur), -1)
         self.pick.setCurrentIndex(i if i >= 0 else self.pick.count() - 1)
@@ -164,10 +178,49 @@ class TrackPage(QtWidgets.QWidget):
             return
         import copy
         p = copy.deepcopy(self.editor.profile)
-        p.name, p.path = name, None
+        p.name, p.path, p.builtin, p.edited = name, None, False, False
         self.editor.profile = p
         self.editor.name_edit.setText(name)
         self.editor.save()
+
+    def _reset(self):
+        p = self.win.a.profile
+        if p is None or not p.edited:
+            return
+        r = QtWidgets.QMessageBox.question(
+            self, "Reset to built-in",
+            f"Go back to {p.name} as shipped with the app?\n\nThis computer's edits to "
+            "its turns are removed, and so is its map image placement.")
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        base = tracks.reset_to_builtin(p)
+        if base is None:
+            return
+        self.win.a.use_profile(base)
+        self.win.remember_track(base)
+        self._key = None
+        self.win.refresh()
+        self.win.status(f"{base.name}: back to the built-in version.")
+
+    def _export(self):
+        p = self.editor.profile if self.editor.profile is not None else self.win.a.profile
+        if p is None:
+            return
+        if self.editor.dirty:
+            QtWidgets.QMessageBox.information(self, "Save first",
+                                              "Save the track first, then export it.")
+            return
+        start = str(Path.home() / f"{Path(p.path).stem if p.path else p.file_stem()}.json")
+        out, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Export track for sharing", start, "Track (*.json)")
+        if not out:
+            return
+        try:
+            p.export(out)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "Couldn't export", str(e))
+            return
+        self.win.status(f"Exported {p.name} to {out} (no map image).")
 
     def _saved(self, p):
         self.win.a.use_profile(p)
