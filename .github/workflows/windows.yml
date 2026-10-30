@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Windows installer. Builds on:
+#   - publishing a GitHub release: the installer is attached to that release
+#   - pull requests that touch the code or packaging: test build, kept 3 days
+#   - "Run workflow" by hand (Actions tab): same as a pull request build
+# Unsigned for now; the signing step goes in after "Build installer".
+name: Windows build
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths: ["src/**", "packaging/**", "tracks/**", "requirements.txt",
+            ".github/workflows/windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to attach the installer to a release
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pyinstaller-hooks-contrib
+
+      - name: Cache ffmpeg + libmpv
+        uses: actions/cache@v4
+        with:
+          path: windows-bin
+          key: windows-bin-${{ hashFiles('packaging/windows/fetch_deps.py') }}-${{ github.run_id }}
+          restore-keys: windows-bin-${{ hashFiles('packaging/windows/fetch_deps.py') }}-
+
+      - name: Fetch ffmpeg + libmpv
+        run: python packaging/windows/fetch_deps.py
+      - name: Put them on PATH for the tests
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$PWD\windows-bin"
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: src
+        run: |
+          python -m pip install pytest pytest-github-actions-annotate-failures
+          python -m pytest -q -rf
+
+      - name: Build installer
+        run: python packaging/windows/build_windows.py
+
+      - name: Self-test the built app
+        shell: pwsh
+        run: |
+          $exe = "build/windows/dist/RaceOverlay/RaceOverlay.exe"
+          $p = Start-Process $exe -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "self-test failed (exit $($p.ExitCode))" }
+          $p = Start-Process $exe -ArgumentList "--cli","--demo" -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA/raceoverlay/helper.log" -ErrorAction SilentlyContinue | Select-Object -Last 15
+          if ($p.ExitCode -ne 0) { throw "demo render failed (exit $($p.ExitCode))" }
+
+      - name: Upload test build
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaceOverlay-windows-setup
+          path: dist/RaceOverlay-*-windows-setup.exe
+          retention-days: 3
+          compression-level: 0
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "${{ github.event.release.tag_name }}" (Get-Item dist/RaceOverlay-*-windows-setup.exe).FullName --clobber

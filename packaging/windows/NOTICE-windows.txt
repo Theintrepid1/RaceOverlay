@@ -1,0 +1,18 @@
+Race Overlay is licensed under the GNU GPL version 3 or later (see
+LICENSE-RaceOverlay.txt). Source: https://github.com/Theintrepid1/RaceOverlay
+
+The Windows build bundles third-party software:
+
+- FFmpeg 8.1 (BtbN win64 GPL static build: ffmpeg.exe, ffprobe.exe),
+  licensed under the GNU GPL version 3 with x264/x265 and other GPL
+  components. Source: https://ffmpeg.org and
+  https://github.com/BtbN/FFmpeg-Builds (see FFmpeg-LICENSE.txt)
+- libmpv (libmpv-2.dll from shinchiro/mpv-winbuild-cmake, see
+  mpv-VERSION.txt for the exact build), GPL version 2 or later.
+  Source: https://mpv.io and https://github.com/shinchiro/mpv-winbuild-cmake
+- Qt 6 / PySide6, LGPL 3. Source: https://www.qt.io
+- Python, numpy, Pillow, pyqtgraph, python-mpv under their own licenses.
+- DejaVu fonts, Bitstream Vera / DejaVu license.
+
+Because GPL components are included, anyone you give this program to is
+entitled to the corresponding source code of those components.

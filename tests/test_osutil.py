@@ -79,6 +79,7 @@ def test_concat_list_uses_forward_slashes(tmp_path):
     lst = tmp_path / "l.txt"
     media.concat_list([str(tmp_path / "it's.mp4")], str(lst))
     line = lst.read_text(encoding="utf-8").strip()
-    assert line.startswith("file '") and "\\\\" not in line
-    assert "it'\\''s.mp4" in line
-    assert os.sep == "/" or "\\" not in line
+    assert line.startswith("file '")
+    assert line.endswith("it'\\''s.mp4'")      # quote escaped the ffmpeg way
+    path_part = line[len("file '"):-len("it'\\''s.mp4'")]
+    assert "\\" not in path_part                 # no Windows backslashes
