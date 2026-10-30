@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtWidgets
 from racecore import analysis
 from raceoverlay.syncgui import settings
 
+from .. import lapcharts
 from ..common import CURSOR, GAIN, LOSS, REF_COLOR, SERIES
 from ..laplist import LapTree
 
@@ -27,44 +28,34 @@ class LapsPage(QtWidgets.QWidget):
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
 
         self.traces = pg.GraphicsLayoutWidget()
-        self.p_delta = self.traces.addPlot(row=0, col=0)
-        self.p_speed = self.traces.addPlot(row=1, col=0)
-        self.p_long = self.traces.addPlot(row=2, col=0)
-        self.p_grip = self.traces.addPlot(row=3, col=0)
-        self.plots = [self.p_delta, self.p_speed, self.p_long, self.p_grip]
-        for p in self.plots:
-            p.showGrid(x=True, y=True, alpha=0.15)
-            for ax in ("left", "bottom"):
-                p.getAxis(ax).enableAutoSIPrefix(False)
-            p.setMenuEnabled(False)
-            p.getAxis("left").setWidth(48)
-            if p is not self.p_delta:
-                p.setXLink(self.p_delta)
-        self.p_delta.setLabel("left", "Delta (s)")
-        self.p_long.setLabel("left", "Brake/accel (g)")
-        self.p_grip.setLabel("left", "Grip used (%)")
-        self.cursors = []
-        for p in self.plots:
-            ln = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen(CURSOR, width=1))
-            ln.sigDragged.connect(lambda l: self.win.set_cursor(self.win.from_x(l.value())))
-            p.addItem(ln, ignoreBounds=True)
-            self.cursors.append(ln)
-        # the reference video's position (ghost mode: not where yours is)
-        self.ref_lines = []
-        for p in self.plots:
-            ln = pg.InfiniteLine(angle=90, movable=False,
-                                 pen=pg.mkPen(REF_COLOR, width=1, style=QtCore.Qt.DashLine))
-            ln.hide()
-            p.addItem(ln, ignoreBounds=True)
-            self.ref_lines.append(ln)
-        self.dots = []        # (plot, channel key, your dot, reference dot)
+        self.chart_keys = lapcharts.load(settings().value("analysis/laps_charts", ""))
+        self.plots, self.cursors, self.ref_lines = [], [], []
+        self.missing = []      # "no X in this file" notes, one per chart
+        self.dots = []         # (plot, channel key, your dot, reference dot)
         self._ys = {}
+        self._build_plots()
         self.traces.scene().sigMouseClicked.connect(self._traces_clicked)
         # legend as a row above the plots, so it never covers a trace
         left = QtWidgets.QWidget()
         ll = QtWidgets.QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(0)
+        # which charts, top to bottom: one picker each, + to add one
+        bar = QtWidgets.QWidget()
+        self.chart_row = QtWidgets.QHBoxLayout(bar)
+        self.chart_row.setContentsMargins(4, 2, 4, 2)
+        self.chart_row.setSpacing(4)
+        self.pickers: list[QtWidgets.QComboBox] = []
+        # scrolls sideways when narrow, so six pickers can't widen the tab
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(bar)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        scroll.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.chart_scroll = scroll
+        ll.addWidget(scroll)
         self.legend = QtWidgets.QLabel("")
         self.legend.setTextFormat(QtCore.Qt.RichText)
         self.legend.setWordWrap(True)
@@ -126,6 +117,7 @@ class LapsPage(QtWidgets.QWidget):
     # ------------------------------------------------------------ updates
     def refresh(self):
         self.laps.rebuild(self.win)
+        self._fill_pickers()
         self.laps_changed()
 
     def laps_changed(self):
@@ -138,9 +130,9 @@ class LapsPage(QtWidgets.QWidget):
     def zoom(self, d0: float | None, d1: float | None):
         w = self.win
         if d0 is None:
-            self.p_delta.setXRange(0, float(w.x(w.a.length)), padding=0.01)
+            self.plots[0].setXRange(0, float(w.x(w.a.length)), padding=0.01)
         else:
-            self.p_delta.setXRange(float(w.x(d0)), float(w.x(d1)), padding=0.02)
+            self.plots[0].setXRange(float(w.x(d0)), float(w.x(d1)), padding=0.02)
 
     def cursor(self, d: float):
         w, a = self.win, self.win.a
@@ -196,19 +188,145 @@ class LapsPage(QtWidgets.QWidget):
             item.setData([x], [y] if np.isfinite(y) else [])
 
     # ------------------------------------------------------------ drawing
+    # ------------------------------------------------------------ charts
+    def _build_plots(self):
+        """One plot per chart key, x-linked, each with the cursor and the
+        reference video's line."""
+        self.traces.clear()
+        self.plots, self.cursors, self.ref_lines, self.missing = [], [], [], []
+        for i, _key in enumerate(self.chart_keys):
+            p = self.traces.addPlot(row=i, col=0)
+            p.showGrid(x=True, y=True, alpha=0.15)
+            for ax in ("left", "bottom"):
+                p.getAxis(ax).enableAutoSIPrefix(False)
+            p.setMenuEnabled(False)
+            p.getAxis("left").setWidth(48)
+            if self.plots:
+                p.setXLink(self.plots[0])
+            # distance numbers on the bottom chart only: more height for traces
+            last = i == len(self.chart_keys) - 1
+            p.getAxis("bottom").setStyle(showValues=last)
+            if not last:
+                p.getAxis("bottom").setHeight(6)
+            cur = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen(CURSOR, width=1))
+            cur.sigDragged.connect(lambda l: self.win.set_cursor(self.win.from_x(l.value())))
+            rl = pg.InfiniteLine(angle=90, movable=False,
+                                 pen=pg.mkPen(REF_COLOR, width=1, style=QtCore.Qt.DashLine))
+            rl.hide()
+            self.plots.append(p)
+            self.cursors.append(cur)
+            self.ref_lines.append(rl)
+            self.missing.append(pg.TextItem("", color="#a8a79f", anchor=(0.5, 0.5)))
+
+    def _fill_pickers(self):
+        """The chart pickers above the traces, from what's loaded now."""
+        while self.chart_row.count():
+            it = self.chart_row.takeAt(0)
+            wd = it.widget()
+            if wd is not None:          # gone now, not at the next event loop pass
+                wd.hide()
+                wd.setParent(None)
+                wd.deleteLater()
+        self.pickers = []
+        lbl = QtWidgets.QLabel("Charts:")
+        self.chart_row.addWidget(lbl)
+        avail = lapcharts.choices(self.win) if self.win.a.ref is not None else []
+        keys = [c.key for c in avail]
+        for i, key in enumerate(self.chart_keys):
+            cb = QtWidgets.QComboBox()
+            cb.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+            cb.setToolTip(f"Chart {i + 1} from the top")
+            for c in avail:
+                cb.addItem(c.label, c.key)
+            if key not in keys:
+                cb.addItem(f"{lapcharts.label_of(key)} (not in these files)", key)
+            cb.insertSeparator(cb.count())
+            cb.addItem("Remove this chart", "__remove__")
+            if len(self.chart_keys) <= lapcharts.MIN_CHARTS:
+                cb.model().item(cb.count() - 1).setEnabled(False)
+            cb.setCurrentIndex(max(0, cb.findData(key)))
+            cb.activated.connect(lambda _j, i=i, cb=cb: self._picked_chart(i, cb.currentData()))
+            self.chart_row.addWidget(cb)
+            self.pickers.append(cb)
+        add = QtWidgets.QToolButton()
+        add.setText("+")
+        add.setToolTip("Add a chart (up to 6)")
+        add.setEnabled(len(self.chart_keys) < lapcharts.MAX_CHARTS)
+        add.clicked.connect(self._add_chart)
+        self.chart_row.addWidget(add)
+        self.chart_row.addStretch(1)
+        self._fit_chart_bar()
+        QtCore.QTimer.singleShot(0, self._fit_chart_bar)
+
+    def _fit_chart_bar(self):
+        """Height for the picker row, plus a scroll bar only when the row
+        is wider than the space it has."""
+        bar = self.chart_scroll.widget()
+        row = self.chart_row
+        m = row.contentsMargins()
+        kids = [row.itemAt(i).widget() for i in range(row.count())]
+        kids = [k for k in kids if k is not None]
+        # from the widgets themselves: the row's own hint lags behind when
+        # it was just rebuilt while the tab was hidden
+        h = max([k.sizeHint().height() for k in kids] + [20]) + m.top() + m.bottom()
+        w = sum(k.sizeHint().width() for k in kids) + row.spacing() * len(kids) \
+            + m.left() + m.right()
+        if max(w, bar.sizeHint().width()) > self.chart_scroll.viewport().width():
+            h += self.chart_scroll.horizontalScrollBar().sizeHint().height()
+        self.chart_scroll.setFixedHeight(h)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if hasattr(self, "chart_scroll"):
+            QtCore.QTimer.singleShot(0, self._fit_chart_bar)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if hasattr(self, "chart_scroll"):
+            QtCore.QTimer.singleShot(0, self._fit_chart_bar)
+
+    def _charts_changed(self):
+        settings().setValue("analysis/laps_charts", lapcharts.dump(self.chart_keys))
+        self._build_plots()
+        self._fill_pickers()
+        self._draw_traces()
+        self.cursor(self.win.cursor_d)
+        self.ref_cursor(self.win.ref_d)
+
+    def _picked_chart(self, i: int, key):
+        if key == "__remove__":
+            if len(self.chart_keys) > lapcharts.MIN_CHARTS:
+                del self.chart_keys[i]
+        elif key and key != self.chart_keys[i]:
+            self.chart_keys[i] = key
+        else:
+            return
+        self._charts_changed()
+
+    def _add_chart(self):
+        if len(self.chart_keys) >= lapcharts.MAX_CHARTS:
+            return
+        have = set(self.chart_keys)
+        avail = [c.key for c in lapcharts.choices(self.win)] if self.win.a.ref else []
+        new = next((k for k in avail if k not in have), "speed")
+        self.chart_keys.append(new)
+        self._charts_changed()
+
+    # ------------------------------------------------------------ drawing
     def _draw_traces(self):
         self.dots = []
         for p, cur, rl in zip(self.plots, self.cursors, self.ref_lines):
             p.clear()
             p.addItem(cur, ignoreBounds=True)
             p.addItem(rl, ignoreBounds=True)
+            p.setLabel("bottom", "")
         w, a = self.win, self.win.a
         if a.ref is None:
             self.legend.setText("")
             return
         x = w.x(a.grid)
-        self.p_speed.setLabel("left", f"Speed ({w.speed_unit()})")
-        self.p_grip.setLabel("bottom", f"Distance ({w.dist_unit()})")
+        axis = {c.key: c.axis for c in lapcharts.choices(w)}
+        self.plots[-1].setLabel("bottom", f"Distance ({w.dist_unit()})")
         for c in a.corners:
             if c.n % 2 == 0:
                 for p in self.plots:
@@ -218,43 +336,51 @@ class LapsPage(QtWidgets.QWidget):
                     band.setZValue(-10)
                     p.addItem(band, ignoreBounds=True)
         rp = pg.mkPen(REF_COLOR, width=1.6)
-        self.p_delta.plot([0, float(x[-1])], [0, 0], pen=rp)
+        laps = [(a.ref, rp)]
         entries = [(REF_COLOR, f"Ref: {w.name(a.ref)}", False)]
-        self.p_speed.plot(x, w.spd(a.channel_on_grid(a.ref, "speed")), pen=rp)
-        g = a.channel_on_grid(a.ref, "lon_g")
-        if g is not None:
-            self.p_long.plot(x, g, pen=rp)
-        self.p_grip.addLine(y=100, pen=pg.mkPen("#6b6a64", style=QtCore.Qt.DashLine))
-        u = a.grip_on_grid(a.ref)
-        if u is not None:
-            self.p_grip.plot(x, u * 100, pen=rp, connect="finite")
         for i, key in enumerate(w.compare):
             ld = w.lap(key)
             if ld is None:
                 continue
-            pen = pg.mkPen(SERIES[i], width=1.8 if key == w.focus else 1.1)
-            self.p_delta.plot(x, a.delta(ld), pen=pen)
+            laps.append((ld, pg.mkPen(SERIES[i], width=1.8 if key == w.focus else 1.1)))
             entries.append((SERIES[i], w.name(ld), key == w.focus))
-            self.p_speed.plot(x, w.spd(a.channel_on_grid(ld, "speed")), pen=pen)
-            g = a.channel_on_grid(ld, "lon_g")
-            if g is not None:
-                self.p_long.plot(x, g, pen=pen)
-            u = a.grip_on_grid(ld)
-            if u is not None:
-                self.p_grip.plot(x, u * 100, pen=pen, connect="finite")
+        for p, key, note in zip(self.plots, self.chart_keys, self.missing):
+            p.setLabel("left", axis.get(key, lapcharts.label_of(key)))
+            p.getAxis("left").setTicks(None)
+            for y in lapcharts.ref_lines(key):
+                p.addLine(y=y, pen=pg.mkPen("#6b6a64", style=QtCore.Qt.DashLine))
+            drawn = 0
+            for lap, pen in laps:
+                ys = lapcharts.values(w, key, lap)
+                if ys is None or not np.any(np.isfinite(ys)):
+                    continue
+                p.plot(x, ys, pen=pen, connect="finite")
+                drawn += 1
+            yr = lapcharts.y_range(key)
+            if yr is not None:
+                p.setYRange(*yr, padding=0)
+            else:
+                p.enableAutoRange(axis="y")
+            if not drawn:
+                note.setText(f"No {lapcharts.label_of(key)} in this file")
+                p.addItem(note, ignoreBounds=True)
+                p.setYRange(0, 1, padding=0)
+                p.getAxis("left").setTicks([[]])     # no numbers on an empty chart
+                note.setPos(float(x[-1]) / 2, 0.5)
         parts = []
         for col, txt, focus in entries:
             name = f"<b>{txt}</b>" if focus else txt
             parts.append(f"<span style='color:{col}; font-size:16px;'>━━</span>&nbsp;"
                          f"<span style='color:#d8d7d0;'>{name}</span>")
         self.legend.setText("&nbsp;&nbsp;&nbsp;&nbsp;".join(parts))
-        self.p_grip.setYRange(0, 115, padding=0)
-        vr = self.p_speed.viewRange()[1]
+        self.plots[0].setXRange(0, float(x[-1]), padding=0.01)
+        top = self.plots[0]
+        top.getViewBox().updateAutoRange()
+        vr = top.viewRange()[1]
         for c in (a.corners if self.names_charts.isChecked() else ()):
             t = pg.TextItem(c.name, color="#d8d7d0", anchor=(0.5, 0))
             t.setPos(float(w.x(c.apex_d)), vr[1])
-            self.p_speed.addItem(t, ignoreBounds=True)
-        self.p_delta.setXRange(0, float(x[-1]), padding=0.01)
+            top.addItem(t, ignoreBounds=True)
         self._make_dots()
 
     def _make_dots(self):
@@ -263,18 +389,13 @@ class LapsPage(QtWidgets.QWidget):
         w, a = self.win, self.win.a
         self.dots, self._ys = [], {}
         ld = w.focus_lap()
-        laps = [(0, ld), (1, a.ref)]
-        for p, key in ((self.p_speed, "speed"), (self.p_long, "lon_g"), (self.p_grip, "grip")):
-            for which, lap in laps:
+        for p, key in zip(self.plots, self.chart_keys):
+            if key == "delta":
+                continue
+            for which, lap in ((0, ld), (1, a.ref)):
                 if lap is None:
                     continue
-                if key == "speed":
-                    ys = w.spd(a.channel_on_grid(lap, "speed"))
-                elif key == "grip":
-                    u = a.grip_on_grid(lap)
-                    ys = None if u is None else u * 100
-                else:
-                    ys = a.channel_on_grid(lap, key)
+                ys = lapcharts.values(w, key, lap)
                 if ys is not None:
                     self._ys[(which, key)] = np.asarray(ys, dtype=float)
             you = p.plot([], [], pen=None, symbol="o", symbolSize=10,
