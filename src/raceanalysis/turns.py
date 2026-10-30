@@ -13,6 +13,10 @@ GPS trace.
    before a split turn and the next click gets 4B). Double-click a name in
    the list to rename it.
 
+Sector lines: "Place sector lines", then click where each sector should
+start (on a straight is best); click a line again to remove it. With none,
+sectors are thirds of the lap.
+
 Saved per track (racecore.tracks), so the next visit already has them.
 Edits stay in this editor until Save; Revert goes back to what's saved.
 """
@@ -28,6 +32,7 @@ from raceoverlay.syncgui import _btn, _note, pick_file
 TRACE = "#3987e5"
 TURN = "#f2f1ec"
 PICK = "#c98500"
+SECTOR = "#b38cff"
 
 
 class TurnsEditor(QtWidgets.QWidget):
@@ -42,7 +47,7 @@ class TurnsEditor(QtWidgets.QWidget):
         self.trace = np.zeros((0, 2))
         self.img = None            # numpy RGBA
         self.img_item = None
-        self.mode = None           # None | "align" | "place"
+        self.mode = None           # None | "align" | "place" | "sector"
         self.pairs: list[tuple] = []
         self.dirty = False
         self.cursor_item = None
@@ -99,6 +104,17 @@ class TurnsEditor(QtWidgets.QWidget):
         brow.addWidget(_btn("Delete turn", self._delete))
         brow.addWidget(_btn("Clear all", self._clear))
         side.addLayout(brow)
+        secrow = QtWidgets.QHBoxLayout()
+        self.btn_sector = _btn("Place sector lines", self._start_sector,
+                               "Click where each sector starts; click a line again to "
+                               "remove it")
+        self.btn_sector.setCheckable(True)
+        secrow.addWidget(self.btn_sector, 1)
+        secrow.addWidget(_btn("Clear lines", self._clear_sectors,
+                              "Remove the sector lines (sectors go back to thirds)"))
+        side.addLayout(secrow)
+        self.sector_note = _note("", small=True)
+        side.addWidget(self.sector_note)
         srow = QtWidgets.QHBoxLayout()
         self.btn_revert = _btn("Revert", self.revert, "Throw away changes since the last save")
         self.btn_save = _btn("Save", self.save, "Save this track and use its turns")
@@ -133,6 +149,7 @@ class TurnsEditor(QtWidgets.QWidget):
         self.mode = None
         self.pairs = []
         self.btn_place.setChecked(False)
+        self.btn_sector.setChecked(False)
         self.name_edit.setText(profile.name)
         self.next_edit.setText(profile.next_name())
         if profile.image:
@@ -228,6 +245,7 @@ class TurnsEditor(QtWidgets.QWidget):
                                   fill=pg.mkBrush(11, 11, 11, 170))
                 lbl.setPos(x, y)
                 self.plot.addItem(lbl)
+        self._draw_sectors()
         self.cursor_item = self.plot.plot([], [], pen=None, symbol="o", symbolSize=12,
                                           symbolPen=pg.mkPen("#0b0b0b", width=2),
                                           symbolBrush=pg.mkBrush("#ffffff"))
@@ -240,6 +258,37 @@ class TurnsEditor(QtWidgets.QWidget):
                 self.plot.plot([world_pt[0]], [world_pt[1]], pen=None, symbol="o",
                                symbolSize=12, symbolBrush=pg.mkBrush(PICK))
         self._fill_list()
+
+    def _sector_points(self) -> list[tuple[int, float, float]]:
+        """(trace index, lat, lon) of each sector line, in lap order."""
+        if self.profile is None or not len(self.trace):
+            return []
+        xy = self.profile.sectors_xy(self.profile.lat0, self.profile.lon0)
+        out = [(tracks.snap(self.trace, pt), la, lo)
+               for pt, (la, lo) in zip(xy, self.profile.sectors)]
+        return sorted(out)
+
+    def _draw_sectors(self):
+        pts = self._sector_points()
+        span = float(np.ptp(self.trace, axis=0).max()) if len(self.trace) else 1.0
+        half = span * 0.025                  # bar length across the track
+        for n, (i, _la, _lo) in enumerate(pts, 2):
+            j0, j1 = max(0, i - 3), min(len(self.trace) - 1, i + 3)
+            t = self.trace[j1] - self.trace[j0]
+            t = t / (np.hypot(*t) or 1.0)
+            nrm = np.array([-t[1], t[0]])
+            c = self.trace[i]
+            a, b = c - nrm * half, c + nrm * half
+            self.plot.plot([a[0], b[0]], [a[1], b[1]], pen=pg.mkPen(SECTOR, width=4))
+            lbl = pg.TextItem(f"S{n}", color=SECTOR, anchor=(0.5, 0.5),
+                              fill=pg.mkBrush(11, 11, 11, 170))
+            lbl.setPos(*(b + nrm * half * 0.6))
+            self.plot.addItem(lbl)
+        if pts:
+            self.sector_note.setText(f"{len(pts) + 1} sectors; S1 starts at the line. "
+                                     "Purple bars mark where the others start.")
+        else:
+            self.sector_note.setText("No sector lines: sectors are thirds of the lap.")
 
     def _fill_list(self):
         self.lst.blockSignals(True)
@@ -268,6 +317,11 @@ class TurnsEditor(QtWidgets.QWidget):
             else:
                 self.msg.setText(f"<b>Point {step} of 2:</b> click a landmark on the "
                                  "<b>map image</b> (start/finish, a hairpin apex…).")
+        elif self.mode == "sector":
+            self.msg.setText("Click on your trace where each sector should start (a "
+                             "straight is best, so no corner is split). Click a line "
+                             "again to remove it. Click \"Place sector lines\" again "
+                             "to stop.")
         elif self.mode == "place":
             self.msg.setText(f"Click turn numbers on the map; each snaps to your trace. "
                              f"Next: <b>{self._next()}</b> (change it in Next turn, "
@@ -286,6 +340,50 @@ class TurnsEditor(QtWidgets.QWidget):
         self.mode = "align"
         self.pairs = []
         self.btn_place.setChecked(False)
+        self.btn_sector.setChecked(False)
+        self._draw()
+        self._hint()
+
+    def _start_sector(self):
+        if self.profile is None:
+            self.btn_sector.setChecked(False)
+            return
+        self.btn_place.setChecked(False)
+        self.mode = "sector" if self.btn_sector.isChecked() else None
+        self.pairs = []
+        self._draw()
+        self._hint()
+
+    def _clear_sectors(self):
+        if self.profile is None or not self.profile.sectors:
+            return
+        self.profile.sectors.clear()
+        self._touch()
+        self._draw()
+
+    def click_sector(self, pt):
+        """Add a sector line at the trace point nearest pt, or remove the
+        line that's already there."""
+        i = tracks.snap(self.trace, pt)
+        s = self.a._ref_s if self.a is not None else None
+        for k, (j, _la, _lo) in enumerate(self._sector_points()):
+            near = (abs(s[min(i, len(s) - 1)] - s[min(j, len(s) - 1)]) < 40.0) if s is not None \
+                else abs(i - j) < 5
+            if near:
+                # remove the stored point that snapped to j
+                xy = self.profile.sectors_xy(self.profile.lat0, self.profile.lon0)
+                idx = min(range(len(xy)), key=lambda q: float(np.hypot(*(xy[q] - self.trace[j]))))
+                del self.profile.sectors[idx]
+                self._touch()
+                self._draw()
+                self._hint()
+                return
+        if i < 3 or i > len(self.trace) - 4:
+            self.msg.setText("That's the start/finish line, where sector 1 already starts.")
+            return
+        lat, lon = tracks.to_latlon([self.trace[i]], self.profile.lat0, self.profile.lon0)[0]
+        self.profile.sectors.append((float(lat), float(lon)))
+        self._touch()
         self._draw()
         self._hint()
 
@@ -293,6 +391,7 @@ class TurnsEditor(QtWidgets.QWidget):
         if self.profile is None:
             self.btn_place.setChecked(False)
             return
+        self.btn_sector.setChecked(False)
         self.mode = "place" if self.btn_place.isChecked() else None
         self.pairs = []
         self._draw()
@@ -305,6 +404,8 @@ class TurnsEditor(QtWidgets.QWidget):
         pt = np.array([p.x(), p.y()])
         if self.mode == "align":
             self.click_align(pt)
+        elif self.mode == "sector":
+            self.click_sector(pt)
         else:
             self.click_place(pt)
 

@@ -149,6 +149,9 @@ class TrackProfile:
     path: str | None = None    # where it was loaded from / saved to
     builtin: bool = False      # loaded from the shipped tracks/ folder
     edited: bool = False       # local copy overriding a built-in one
+    # sector lines, as points on the track (lat, lon); n lines make n + 1
+    # sectors. None of them: the analysis splits the lap in thirds.
+    sectors: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -163,6 +166,12 @@ class TrackProfile:
 
     def set_ab(self, a: complex, b: complex):
         self.transform = (a.real, a.imag, b.real, b.imag)
+
+    def sectors_xy(self, lat0: float, lon0: float) -> np.ndarray:
+        """Sector line positions in another frame."""
+        if not self.sectors:
+            return np.zeros((0, 2))
+        return to_xy([p[0] for p in self.sectors], [p[1] for p in self.sectors], lat0, lon0)
 
     def turns_xy(self, lat0: float, lon0: float) -> np.ndarray:
         """Turn positions in another frame (e.g. an analysis' origin)."""
@@ -188,6 +197,7 @@ class TrackProfile:
         img = Path(self.image).name if self.image and not share else None
         return {"name": self.name, "start": [self.lat0, self.lon0],
                 "turns": [{"name": t.name, "lat": t.lat, "lon": t.lon} for t in self.turns],
+                "sectors": [{"lat": la, "lon": lo} for la, lo in self.sectors],
                 "image": img,
                 "transform": list(self.transform) if self.transform and img else None}
 
@@ -208,7 +218,9 @@ class TrackProfile:
             img = str(Path(path).parent / img)
         return cls(d.get("name", "Track"), float(d["start"][0]), float(d["start"][1]),
                    [Turn(t["name"], float(t["lat"]), float(t["lon"])) for t in d.get("turns", [])],
-                   img, tuple(d["transform"]) if d.get("transform") else None, path)
+                   img, tuple(d["transform"]) if d.get("transform") else None,
+                   sectors=[(float(q["lat"]), float(q["lon"])) for q in d.get("sectors", [])],
+                   path=path)
 
     def save(self, folder: Path | None = None) -> Path:
         folder = Path(folder) if folder else tracks_dir()

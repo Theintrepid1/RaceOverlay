@@ -1,8 +1,6 @@
 # Roadmap
 
-## Next — planned (see the project's change list, batches C–F)
-- Laps tab charts: add/remove (1–6), any channel per chart
-- Track-defined sectors (turns editor, built-in tracks, thirds fallback)
+## Next — planned (see the project's change list, batches D–F)
 - Import: fix the GoPro's reset clock for a whole card at once (GPS-suggested)
 - Overlay: logo/image and text gauges; intro and end cards; separate app icons
 - Day tab: compare many sessions (consecutive / baseline) across several days
@@ -13,6 +11,10 @@
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **Next release (in PR, not released yet):** Laps tab charts you pick, add
+  and remove (1–6; any built-in trace or engine channel); track-defined
+  sectors set on the Track tab (VIR Full ships with two lines; thirds when a
+  track has none).
 - **Next release (in PR, not released yet):** Race Analysis bugs and polish.
   APEX exports recognized in all three naming styles (short session names,
   ID-only files dated from the GoPro's GPS or typed start); tabs no longer

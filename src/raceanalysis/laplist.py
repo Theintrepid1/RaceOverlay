@@ -42,6 +42,16 @@ class LapTree(QtWidgets.QTreeWidget):
             return
         best = a.ref.time
         bsec = [t for t, _ in a.best_sectors()]
+        if not self.compact:          # as many sector columns as the track has
+            cols = ["Lap", "Gap", "Grip"] + [f"S{k + 1}" for k in range(a.n_sectors)]
+            self.setColumnCount(len(cols))
+            self.setHeaderLabels(cols)
+            self.ncol = len(cols)
+            how = ("the track's sector lines (Track tab)" if a.sector_source == "track"
+                   else "thirds of the reference lap (set sector lines on the Track tab)")
+            for k in range(a.n_sectors):
+                self.headerItem().setToolTip(3 + k, f"Sector {k + 1} time; sectors are {how}. "
+                                                    "Purple = best of all laps.")
         for si, s in enumerate(a.sessions):
             vid = "video" if s.video else "no video"
             top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid})"])
