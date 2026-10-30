@@ -255,9 +255,9 @@ class CornersPage(QtWidgets.QWidget):
             if best_ld is None or to_best < 0.005 or cr.best_key == ld.key:
                 best = "this lap"
             else:
-                best = f"L{best_ld.lap.n}  {to_best:.2f} quicker"
-                if len(a.sessions) > 1:
-                    best = f"{w.label(best_ld)}  {to_best:.2f} quicker"
+                # the gain first, so it still shows when a long lap name is cut
+                who = w.label(best_ld) if len(a.sessions) > 1 else f"L{best_ld.lap.n}"
+                best = f"{to_best:.2f} quicker · {who}"
             cells = [c.name + (f" ({c.direction})" if c.direction else ""),
                      "" if is_ref else fmt_gap(cr.lost), grip, vmin, brake, best]
             for col, txt in enumerate(cells):

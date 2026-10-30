@@ -149,10 +149,14 @@ class OverviewPage(QtWidgets.QWidget):
         f.setBold(True)
         hello.setFont(f)
         el.addWidget(hello, 0, QtCore.Qt.AlignHCenter)
-        el.addWidget(_note("<b>At the track:</b> import the new recordings off the GoPro card; "
-                           "they're matched to your data files and synced.<br>"
-                           "<b>Later:</b> open a track day you imported before."),
-                     0, QtCore.Qt.AlignHCenter)
+        intro = _note("<b>At the track:</b> import the new recordings off the GoPro card; "
+                      "they're matched to your data files and synced.<br>"
+                      "<b>Later:</b> open a track day you imported before.")
+        # a centred wrapping label gets cut off unless its width and height
+        # are pinned (an aligned layout item doesn't ask height-for-width)
+        intro.setFixedWidth(460)
+        intro.setMinimumHeight(intro.heightForWidth(460))
+        el.addWidget(intro, 0, QtCore.Qt.AlignHCenter)
         brow = QtWidgets.QHBoxLayout()
         brow.addStretch(1)
         brow.addWidget(_btn("Import from GoPro card…", win.import_card, big=True))
