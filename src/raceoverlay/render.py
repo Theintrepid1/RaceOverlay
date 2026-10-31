@@ -143,6 +143,10 @@ class OverlayContext:
         self._track_cache.clear()
 
     def gauge_available(self, g: dict) -> bool:
+        if g["type"] == "image":
+            return gauges.load_logo(g.get("image", "")) is not None
+        if g["type"] == "text":
+            return bool(g.get("text"))
         return self.telem.has(g["src"])
 
     def shown(self) -> list[str]:
@@ -353,7 +357,8 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
             gauges.draw_map(f, box, st, ctx.track_img(box), ctx.cur_map(t))
         elif name in customs:
             g = customs[name]
-            gauges.CUSTOM_DRAW[g["type"]](f, box, st, g, ctx.gauge_values(g, t))
+            v = ctx.gauge_values(g, t) if g["type"] in gauges.DATA_TYPES else None
+            gauges.CUSTOM_DRAW[g["type"]](f, box, st, g, v)
         elif name == "gball":
             lat, lon = ctx.g_at(t)
             trail = []

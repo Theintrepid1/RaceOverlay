@@ -797,6 +797,163 @@ class GaugeDialog(QtWidgets.QDialog):
                     self.lines.append(ln)
 
 
+def import_logo(path: str) -> tuple[str, float]:
+    """Copy a logo into gauges.logos_dir() (an SVG is drawn to a PNG first).
+    Returns (file name there, height / width)."""
+    import hashlib
+    from PIL import Image
+    src = Path(path)
+    data = src.read_bytes()
+    name = hashlib.sha1(data).hexdigest()[:16]
+    dest_dir = gauges.logos_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if src.suffix.lower() == ".svg":
+        from PySide6 import QtSvg
+        r = QtSvg.QSvgRenderer(str(src))
+        if not r.isValid():
+            raise ValueError("couldn't read this SVG")
+        sz = r.defaultSize()
+        w = 1200
+        h = max(1, int(round(w * sz.height() / max(1, sz.width()))))
+        img = QtGui.QImage(w, h, QtGui.QImage.Format_ARGB32)
+        img.fill(QtCore.Qt.transparent)
+        pa = QtGui.QPainter(img)
+        r.render(pa)
+        pa.end()
+        dest = dest_dir / f"{name}.png"
+        img.save(str(dest))
+    else:
+        im = Image.open(src)
+        im.load()
+        dest = dest_dir / f"{name}.png"
+        im.convert("RGBA").save(dest)
+    with Image.open(dest) as im:
+        return dest.name, im.height / max(1, im.width)
+
+
+class SimpleGaugeDialog(QtWidgets.QDialog):
+    """Logo or text gauge: a picture (PNG/SVG/JPG) with opacity, or a line
+    of text with a color."""
+
+    COLORS = [("White", "fg"), ("Accent (style color)", "accent")]
+
+    def __init__(self, parent, g: dict):
+        super().__init__(parent)
+        self.g = dict(g)
+        logo = g["type"] == "image"
+        self.setWindowTitle("Logo" if logo else "Text")
+        lay = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        lay.addLayout(form)
+        if logo:
+            row = QtWidgets.QHBoxLayout()
+            self.file_lbl = QtWidgets.QLabel("")
+            self.file_lbl.setWordWrap(True)
+            row.addWidget(self.file_lbl, 1)
+            row.addWidget(_btn("Choose…", self._choose))
+            form.addRow("Picture", row)
+            self.name_ed = QtWidgets.QLineEdit(g.get("label", ""))
+            self.name_ed.setPlaceholderText("e.g. sponsor name (for the list)")
+            form.addRow("Name", self.name_ed)
+            orow = QtWidgets.QHBoxLayout()
+            self.op = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self.op.setRange(10, 100)
+            self.op.setValue(int(g.get("opacity", 100)))
+            self.op_lbl = QtWidgets.QLabel()
+            self.op.valueChanged.connect(lambda v: self.op_lbl.setText(f"{v}%"))
+            self.op_lbl.setText(f"{self.op.value()}%")
+            orow.addWidget(self.op, 1)
+            orow.addWidget(self.op_lbl)
+            form.addRow("Opacity", orow)
+            self.preview = QtWidgets.QLabel()
+            self.preview.setAlignment(QtCore.Qt.AlignCenter)
+            self.preview.setMinimumHeight(120)
+            self.preview.setStyleSheet("background:#3a4250; border-radius:6px;")
+            lay.addWidget(self.preview)
+            lay.addWidget(_note("PNG with a transparent background looks best. The "
+                                "picture is copied into the app, so it keeps working "
+                                "if the original moves. Drag it into place with "
+                                "\"Move && resize gauges\".", small=True))
+            self._show_file()
+        else:
+            self.text_ed = QtWidgets.QLineEdit(g.get("text", ""))
+            self.text_ed.setPlaceholderText("e.g. Beer City Racing  #117")
+            form.addRow("Text", self.text_ed)
+            crow = QtWidgets.QHBoxLayout()
+            self.color_cb = QtWidgets.QComboBox()
+            for t, v in self.COLORS:
+                self.color_cb.addItem(t, v)
+            col = g.get("color") or "fg"
+            if self.color_cb.findData(col) < 0:
+                self.color_cb.addItem(f"Custom {col}", col)
+            self.color_cb.setCurrentIndex(self.color_cb.findData(col))
+            crow.addWidget(self.color_cb, 1)
+            crow.addWidget(_btn("Pick…", self._pick_color))
+            form.addRow("Color", crow)
+            lay.addWidget(_note("Uses the overlay style's font and outline. Resize "
+                                "it with the mouse wheel in \"Move && resize "
+                                "gauges\".", small=True))
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(460, 0)
+
+    def _show_file(self):
+        p = gauges.logo_path(self.g.get("image", ""))
+        if p and Path(p).exists():
+            self.file_lbl.setText(self.g.get("label") or "Picture loaded")
+            pm = QtGui.QPixmap(str(p))
+            self.preview.setPixmap(pm.scaled(360, 120, QtCore.Qt.KeepAspectRatio,
+                                             QtCore.Qt.SmoothTransformation))
+        else:
+            self.file_lbl.setText("None yet" if not self.g.get("image") else
+                                  "The picture isn't on this computer; choose it again.")
+            self.preview.clear()
+
+    def _choose(self):
+        p = pick_file(self, "Logo picture", "logo",
+                      "Pictures (*.png *.svg *.jpg *.jpeg *.webp);;All files (*)")
+        if not p:
+            return
+        try:
+            name, aspect = import_logo(p)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            QtWidgets.QMessageBox.warning(self, "Can't use this picture", f"{p}\n\n{e}")
+            return
+        self.g.update(image=name, aspect=aspect)
+        if not self.name_ed.text().strip():
+            self.name_ed.setText(Path(p).stem)
+        self._show_file()
+
+    def _pick_color(self):
+        c = QtWidgets.QColorDialog.getColor(parent=self)
+        if c.isValid():
+            hx = c.name()
+            i = self.color_cb.findData(hx)
+            if i < 0:
+                self.color_cb.addItem(f"Custom {hx}", hx)
+                i = self.color_cb.count() - 1
+            self.color_cb.setCurrentIndex(i)
+
+    def _ok(self):
+        if self.g["type"] == "image":
+            if not self.g.get("image"):
+                QtWidgets.QMessageBox.information(self, "No picture", "Choose a picture first.")
+                return
+            self.g.update(label=self.name_ed.text().strip(), opacity=self.op.value())
+        else:
+            if not self.text_ed.text().strip():
+                QtWidgets.QMessageBox.information(self, "No text", "Type the text first.")
+                return
+            self.g.update(text=self.text_ed.text().strip(), color=self.color_cb.currentData())
+        self.accept()
+
+    def result_gauge(self) -> dict:
+        return gauges.normalize_gauge(self.g)
+
+
 class MergeDialog(QtWidgets.QDialog):
     """Pick several video files and put them in order."""
 
@@ -1263,7 +1420,7 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addWidget(self.edit_btn)
         gl.addWidget(_note("While on: drag gauges on the video, scroll the "
                            "mouse wheel over one to resize it.", small=True))
-        gl.addWidget(_note("<b>Data gauges</b> (pick any channel):"))
+        gl.addWidget(_note("<b>Your gauges</b> (any channel, logos, text):"))
         self.custom_list = QtWidgets.QListWidget()
         self.custom_list.setMinimumHeight(130)
         self.custom_list.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -1271,8 +1428,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.custom_list.itemDoubleClicked.connect(lambda _: self._edit_gauge())
         gl.addWidget(self.custom_list)
         crow = QtWidgets.QGridLayout()
-        for i, (text, slot) in enumerate((("Add…", self._add_gauge),
+        for i, (text, slot) in enumerate((("Add data gauge…", self._add_gauge),
                                           ("Edit…", self._edit_gauge),
+                                          ("Add logo…", lambda: self._add_simple("image")),
+                                          ("Add text…", lambda: self._add_simple("text")),
                                           ("Copy", self._dup_gauge),
                                           ("Delete", self._del_gauge))):
             crow.addWidget(_btn(text, slot), i // 2, i % 2)
@@ -1996,18 +2155,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.custom_list.blockSignals(True)
         self.custom_list.clear()
         for g in self.layout_.get("custom", []):
-            name = g.get("label") or src_label(self.telem, g["src"])
+            if g["type"] in gauges.DATA_TYPES:
+                name = g.get("label") or src_label(self.telem, g["src"])
+            else:
+                name = gauges.box_label(self.layout_, g["id"])
             text = f"{name}  ·  {gauges.GAUGE_TYPES[g['type']]}"
             ok = self.ctx is None or self.ctx.gauge_available(g)
             if not ok:
-                text += "   (no data)"
+                text += ("   (picture missing)" if g["type"] == "image" else "   (no data)")
             it = QtWidgets.QListWidgetItem(text)
             it.setData(QtCore.Qt.UserRole, g["id"])
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Checked if g["on"] else QtCore.Qt.Unchecked)
             if not ok:
                 it.setForeground(QtGui.QBrush(QtGui.QColor(140, 140, 140)))
-                it.setToolTip(f"'{src_label(self.telem, g['src'])}' isn't in "
+                it.setToolTip("The picture isn't on this computer: Edit… and choose it "
+                              "again." if g["type"] == "image" else
+                              f"'{src_label(self.telem, g['src'])}' isn't in "
                               "this file, so this gauge is skipped.")
             self.custom_list.addItem(it)
         self.custom_list.blockSignals(False)
@@ -2046,8 +2210,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fill_custom_list()
             self.custom_list.setCurrentRow(self.custom_list.count() - 1)
 
+    def _add_simple(self, kind: str):
+        g = gauges.normalize_gauge(dict(id=gauges.new_gauge_id(self.layout_), type=kind,
+                                        color="fg", x=0.04 if kind == "image" else 0.40,
+                                        y=0.80 if kind == "image" else 0.05,
+                                        scale=0.8 if kind == "image" else 1.0))
+        dlg = SimpleGaugeDialog(self, g)
+        if dlg.exec():
+            self.layout_["custom"].append(dlg.result_gauge())
+            self._layout_changed()
+            self._fill_custom_list()
+            self.custom_list.setCurrentRow(self.custom_list.count() - 1)
+
     def _edit_gauge(self):
         g = self._selected_gauge()
+        if g is not None and g["type"] not in gauges.DATA_TYPES:
+            dlg = SimpleGaugeDialog(self, g)
+            if dlg.exec():
+                g.update(dlg.result_gauge())
+                self._layout_changed()
+                self._fill_custom_list()
+            return
         if g is None or not self._need_data():
             return
         dlg = GaugeDialog(self, self.ctx, g)

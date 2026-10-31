@@ -143,15 +143,52 @@ PURPLE = (190, 120, 255, 255)
 #   orient (h|v, bars), color (accent|throttle|brake|good|bad|#rrggbb),
 #   align (left|center, numbers), show_value, x, y, scale, on
 
-GAUGE_TYPES = {"number": "Number", "bar": "Bar", "dial": "Dial"}
+GAUGE_TYPES = {"number": "Number", "bar": "Bar", "dial": "Dial",
+               "image": "Logo", "text": "Text"}
+DATA_TYPES = {"number", "bar", "dial"}      # the ones that show a channel
 BASE_SIZE = {("number", ""): (220, 100), ("bar", "h"): (300, 64),
              ("bar", "v"): (64, 240), ("dial", ""): (220, 220)}
+LOGO_WIDTH = 240          # a logo's width at 1080p, scale 1
+TEXT_PX = 44              # a text gauge's font size at 1080p, scale 1
 
+#   Logo and text gauges (no channel): image (file name in logos_dir()),
+#   aspect (height / width of the image), opacity (0-100); text.
 GAUGE_DEFAULTS = {"type": "number", "src": "speed", "label": "",
                   "unit": "auto", "conv": "", "decimals": -1, "min": None,
                   "max": None, "redline": None, "orient": "h",
                   "color": "accent", "align": "left", "show_value": True,
-                  "x": 0.4, "y": 0.4, "scale": 1.0, "on": True}
+                  "x": 0.4, "y": 0.4, "scale": 1.0, "on": True,
+                  "image": "", "aspect": 1.0, "opacity": 100, "text": ""}
+
+
+def logos_dir():
+    """Where logo images are kept: copied in when added, so a layout keeps
+    working if the original file moves (and other computers can get the
+    same file name in their own folder)."""
+    from racecore import osutil
+    return osutil.data_dir() / "logos"
+
+
+def logo_path(name: str):
+    return logos_dir() / name if name else None
+
+
+@functools.lru_cache(maxsize=32)
+def _logo(name: str, mtime: float):
+    from pathlib import Path
+    p = logo_path(name)
+    if p is None or not Path(p).exists():
+        return None
+    return Image.open(p).convert("RGBA")
+
+
+def load_logo(name: str):
+    """The logo as RGBA, or None if its file isn't in logos_dir()."""
+    p = logo_path(name)
+    try:
+        return _logo(name, os.path.getmtime(p)) if p else None
+    except OSError:
+        return None
 
 # Unit conversions offered for a gauge: key -> (menu label, from-units,
 # function, new unit)
@@ -211,8 +248,9 @@ def normalize_gauge(g: dict) -> dict:
     out.update({k: v for k, v in g.items() if k in GAUGE_DEFAULTS or k == "id"})
     if out["type"] not in GAUGE_TYPES:
         out["type"] = "number"
-    for f in ("x", "y", "scale"):
+    for f in ("x", "y", "scale", "aspect"):
         out[f] = float(out[f])
+    out["opacity"] = int(max(0, min(100, out["opacity"])))
     out["on"] = bool(out["on"])
     return out
 
@@ -270,6 +308,13 @@ def entry(layout: dict, name: str) -> dict | None:
 
 
 def base_size(g: dict) -> tuple[int, int]:
+    if g["type"] == "image":
+        return LOGO_WIDTH, max(1, int(round(LOGO_WIDTH * float(g.get("aspect") or 1.0))))
+    if g["type"] == "text":
+        f = _font(TEXT_PX, "bold")
+        l, t, r, b = f.getbbox(g.get("text") or " ")
+        pad = 2 * 10
+        return max(40, int(r - min(0, l)) + pad), int(TEXT_PX * 1.3) + pad // 2
     key = (g["type"], g.get("orient", "h") if g["type"] == "bar" else "")
     return BASE_SIZE.get(key, (220, 100))
 
@@ -297,6 +342,10 @@ def box_label(layout: dict, name: str) -> str:
     g = entry(layout, name)
     if g is None:
         return name
+    if g["type"] == "text":
+        return g.get("text") or "Text"
+    if g["type"] == "image":
+        return g.get("label") or "Logo"
     return g.get("label") or g.get("src", "").replace("col:", "") or name
 
 
@@ -792,4 +841,47 @@ def draw_dial(f: Frame, box, st: Style, g: dict, v: dict):
               anchor="ma")
 
 
-CUSTOM_DRAW = {"number": draw_number, "bar": draw_bar, "dial": draw_dial}
+@functools.lru_cache(maxsize=16)
+def _logo_sized(name: str, w: int, h: int, opacity: int, mtime: float):
+    src = _logo(name, mtime)
+    if src is None:
+        return None
+    img = src.resize((max(1, w), max(1, h)), Image.LANCZOS)
+    if opacity < 100:
+        a = img.getchannel("A").point(lambda v: v * opacity // 100)
+        img.putalpha(a)
+    return img
+
+
+def draw_image(f: Frame, box, st: Style, g: dict, _v=None):
+    """A logo: drawn as is (no gauge background), at its own aspect."""
+    x, y, w, h, _k = box
+    p = logo_path(g.get("image", ""))
+    try:
+        mt = os.path.getmtime(p) if p else 0.0
+    except OSError:
+        return
+    img = _logo_sized(g["image"], int(round(w)), int(round(h)), int(g.get("opacity", 100)), mt)
+    if img is None:
+        return
+    x0, y0 = int(round(x)), int(round(y))
+    sx, sy = max(0, -x0), max(0, -y0)
+    ex, ey = min(img.width, f.w - x0), min(img.height, f.h - y0)
+    if ex > sx and ey > sy:
+        f.img.alpha_composite(img, (x0 + sx, y0 + sy), (sx, sy, ex, ey))
+
+
+def draw_text_gauge(f: Frame, box, st: Style, g: dict, _v=None):
+    """Plain text (team name, car number): the style's font and outline."""
+    x, y, w, h, k = box
+    text = g.get("text") or ""
+    if not text:
+        return
+    _panel(f, box, st)
+    col = _color(st, g.get("color") or "fg")
+    _text(f, (x + w / 2, y + h / 2), text, _font(TEXT_PX * k, st.font), col, st, k,
+          anchor="mm")
+
+
+CUSTOM_DRAW = {"number": draw_number, "bar": draw_bar, "dial": draw_dial,
+               "image": draw_image, "text": draw_text_gauge}
