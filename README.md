@@ -230,6 +230,12 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v1.2.0 — Race Analysis and Race Overlay polish:
+- **Race Analysis:** pick your own charts, track-defined sectors, labels on the charts, and a better Day tab.
+- **Import:** fixes a GoPro clock that reset to 2016.
+- **Race Overlay:** logo and text gauges, optional intro and end cards, smoother round gauges.
+- **Both apps:** separate icons.
+
 v1.1.0 — Windows and a shared track library. Windows installer (per-user,
 unsigned for now) built by GitHub Actions and attached to each release;
 Race Analysis ships with built-in tracks (VIR Full Course to start), with

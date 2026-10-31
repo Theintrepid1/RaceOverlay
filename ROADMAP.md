@@ -9,22 +9,17 @@
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
-- **Next release (in PR, not released yet):** Laps tab charts you pick, add
-  and remove (1–6; any built-in trace or engine channel); track-defined
-  sectors set on the Track tab (VIR Full ships with two lines; thirds when a
-  track has none). Import fixes a GoPro clock that reset to 2016: one shift
-  for every ticked recording, filled in from the GPS time when there's a fix.
-  Overlay logo and text gauges; optional intro and end cards (off by
-  default); separate icons and taskbar identities for the two apps.
-- **Next release (in PR, not released yet):** Race Analysis bugs and polish.
-  APEX exports recognized in all three naming styles (short session names,
-  ID-only files dated from the GoPro's GPS or typed start); tabs no longer
-  held wide by other tabs; long table cells capped with a tooltip; readout
-  strip digits no longer clipped; g-g direction labels placed by the data;
-  smooth (antialiased) g-ball and track map on the overlay; lap-time and
-  g labels on the Overview and Day charts; turn-name toggles on the Laps
-  tab; Day tab start time and tire pressures as separate boxes with hot
-  gain; envelope numbers table and hover readout on the Day tab.
+- **v1.2.0** (2026-10-31):
+  - **Race Analysis:**
+    - APEX exports recognized in all three naming styles, with short session names.
+    - Charts on the Laps tab you pick, add and remove (1–6, any channel).
+    - Track-defined sectors (VIR Full ships with two lines).
+    - Lap-time and g labels on the charts; turn-name toggles.
+    - Day tab: split start time, tire pressure grids with hot gain, envelope numbers and hover readout.
+    - Tabs no longer held wide by other tabs; readout strip digits no longer clipped; g-g labels placed by the data.
+  - **Import:** fixes a GoPro clock that reset to 2016, one shift for the whole card, filled in from GPS when there's a fix.
+  - **Race Overlay:** smooth g-ball and track map; logo and text gauges; optional intro and end cards.
+  - **Both apps:** separate icons and taskbar identities.
 - **v1.1.0** (2026-10-30): Windows (same code as Linux, per-user installer
   built by GitHub Actions on each release, unsigned); built-in track library
   shipped with the app (VIR Full Course), local overrides, Reset to built-in,
