@@ -116,3 +116,56 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_camera_clock_fix():
+    """The HERO's clock reset to 2016: shift every clip by one amount,
+    file them under the right day, and remember it for the Day tab."""
+    from racecore import day, gpmf
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _card(tmp)
+        lib = os.path.join(tmp, "lib")
+        clips = ingest.scan_clips(root, lib, probe=False)
+        cam = [dt.datetime(2016, 1, 1, 0, 12), dt.datetime(2016, 1, 1, 0, 41)]
+        for c, t in zip(clips, cam):
+            c.recorded = t
+        assert ingest.clock_looks_wrong(clips, today=dt.date(2026, 9, 28))
+        ok = [ingest.Clip("1", "GH", ["x"], 0, dt.datetime(2026, 9, 27, 10, 0))]
+        assert not ingest.clock_looks_wrong(ok, today=dt.date(2026, 9, 28))
+
+        # GPS: clip 0 has no fix, clip 1 does (time in UTC; camera is local)
+        real1 = dt.datetime(2026, 9, 27, 10, 42, 5)
+        utc = dt.timezone.utc
+
+        def fake_gps(path, max_s=None):
+            if path == clips[1].chapters[0]:
+                return 30.0, (real1 + dt.timedelta(seconds=30)).replace(tzinfo=utc)
+            return None
+        real = gpmf.gps_time
+        gpmf.gps_time = fake_gps
+        try:
+            secs, src = ingest.gps_clock_fix(sorted(clips, key=lambda c: c.recorded),
+                                             local_tz=utc)
+        finally:
+            gpmf.gps_time = real
+        assert src is clips[1]
+        assert abs(secs - (real1 - cam[1]).total_seconds()) < 1e-6
+
+        ingest.fix_clock(clips, secs)
+        assert clips[1].recorded == real1
+        assert clips[1].recorded - clips[0].recorded == cam[1] - cam[0]   # gaps kept
+        ingest.fix_clock(clips, secs)                                      # not twice
+        assert clips[1].recorded == real1
+
+        out = ingest.import_clips(clips, lib)
+        for c, paths in zip(clips, out):
+            assert all(Path(p).parent.name == "2026-09-27" for p in paths)
+            assert abs(Path(paths[0]).stat().st_mtime - c.recorded.timestamp()) < 2
+            rec, fix = ingest.recorded_for(paths)
+            assert rec == c.recorded.replace(microsecond=0) and abs(fix - secs) < 0.1
+        # the Day tab's start time uses the corrected time (no GPS in these files)
+        start, src_kind, _ = day.find_start((out[1], 5.0), 36.5, -79.2)
+        assert src_kind == "fixed" and start == "2026-09-27 10:42"   # 10:42:05 - 5 s
+        # scanning again (camera times, 2016) still sees them as imported
+        again = ingest.scan_clips(root, lib, probe=False)
+        assert all(c.imported for c in again if c.name in {x.name for x in clips})

@@ -4,6 +4,9 @@
 
   find_cards()       mounted GoPro SD cards (anything with DCIM/1xxGOPRO)
   scan_clips()       a card's recordings, chapters grouped, newest first
+  clock_looks_wrong(), gps_clock_fix(), fix_clock()
+                     the HERO's clock resets (to 2016) when its battery is
+                     out; work out the error and shift every clip by it
   import_clips()     copy recordings into <library>/<YYYY-MM-DD>/, untouched
                      (raw chapters keep their GPMF sensor track), skipping
                      files already copied; nothing on the card is changed
@@ -58,6 +61,7 @@ class Clip:
     recorded: dt.datetime | None = None   # camera clock (local, naive)
     duration: float | None = None         # seconds, all chapters
     imported: bool = False      # every chapter already in the library
+    clock_fix: float = 0.0      # seconds added to the camera's clock (fix_clock)
 
     @property
     def name(self) -> str:
@@ -156,12 +160,101 @@ def scan_clips(root: str, library: str | None = None, probe: bool = True) -> lis
             dur = sum(d for d in durs if d) if any(durs) else None
         clip = Clip(num, kind, paths, size, rec, dur)
         if library:
-            clip.imported = all(dest_path(clip, library, p).exists() and
-                                dest_path(clip, library, p).stat().st_size ==
-                                Path(p).stat().st_size for p in paths)
+            clip.imported = all(_in_library(library, clip, p) for p in paths)
         clips.append(clip)
     clips.sort(key=lambda c: (c.recorded or dt.datetime.min, c.number), reverse=True)
     return clips
+
+
+# ------------------------------------------------------------ camera clock ---
+# A GoPro HERO loses its date and time when the battery comes out and starts
+# again from 2016. The video files keep that wrong time; the GPS track (when
+# GPS was on and had a fix) carries the real UTC time.
+
+def clock_looks_wrong(clips: list[Clip], today: dt.date | None = None) -> bool:
+    """True if any clip claims a date before 2020 or after tomorrow."""
+    today = today or dt.date.today()
+    return any(c.recorded is not None and
+               (c.recorded.year < 2020 or c.recorded.date() > today + dt.timedelta(days=1))
+               for c in clips)
+
+
+def gps_clock_fix(clips: list[Clip], tries: int = 3, look_s: float = 120.0,
+                  local_tz=None, cancelled=None) -> tuple[float, Clip] | None:
+    """(seconds to add to the camera clock, the clip it came from), from the
+    first of these clips whose GPS had a fix within look_s seconds; None if
+    none did. The camera clock is local time, so the GPS time is put in
+    local_tz (default: this computer's time zone)."""
+    from . import gpmf
+    for clip in [c for c in clips if c.recorded is not None][:tries]:
+        if cancelled and cancelled():
+            return None
+        try:
+            g = gpmf.gps_time(clip.chapters[0], max_s=look_s)
+        except Exception:  # noqa: BLE001 - a clip we can't read just gives no fix
+            g = None
+        if g is None:
+            continue
+        vt, utc = g
+        start = (utc - dt.timedelta(seconds=vt)).astimezone(local_tz).replace(tzinfo=None)
+        return (start - clip.recorded).total_seconds(), clip
+    return None
+
+
+def fix_clock(clips: list[Clip], seconds: float):
+    """Shift every clip's recorded time by the same amount (keeps their
+    order and the gaps between sessions)."""
+    for c in clips:
+        if c.recorded is not None:
+            c.recorded = c.recorded - dt.timedelta(seconds=c.clock_fix) \
+                + dt.timedelta(seconds=seconds)
+        c.clock_fix = float(seconds)
+
+
+def recorded_for(parts: list[str]) -> tuple[dt.datetime | None, float]:
+    """(corrected recording time, clock fix in seconds) saved at import,
+    from the video's sidecar; (None, 0) when there isn't one."""
+    try:
+        data = json.loads(sidecar_path(parts).read_text(encoding="utf-8"))
+        rec = data.get("recorded")
+        return (dt.datetime.fromisoformat(rec) if rec else None,
+                float(data.get("clock_fix_s", 0.0)))
+    except (OSError, ValueError, TypeError):
+        return None, 0.0
+
+
+def save_clock(parts: list[str], clip: Clip) -> Path | None:
+    """Record the clip's corrected time next to the video (same sidecar as
+    the sync); other settings in the file are kept."""
+    sc = sidecar_path(parts)
+    data = {}
+    if sc.exists():
+        try:
+            data = json.loads(sc.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    if clip.recorded is not None:
+        data["recorded"] = clip.recorded.isoformat(timespec="seconds")
+    data["clock_fix_s"] = round(float(clip.clock_fix), 1)
+    try:
+        sc.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return sc
+
+
+def _in_library(library: str, clip: Clip, src: str) -> bool:
+    """Already copied: in its day folder, or (imported with a corrected
+    clock, so under another day) any day folder, same name and size."""
+    size = Path(src).stat().st_size
+    d = dest_path(clip, library, src)
+    if d.exists() and d.stat().st_size == size:
+        return True
+    try:
+        return any(p.stat().st_size == size
+                   for p in Path(library).glob(f"*/{Path(src).name}"))
+    except OSError:
+        return False
 
 
 def day_folder(clip: Clip, library: str) -> Path:
@@ -191,6 +284,7 @@ def import_clips(clips: list[Clip], library: str, progress=None, cancelled=None)
         if dst.exists() and dst.stat().st_size == size:
             done += size
             out[id(clip)].append(str(dst))
+            _stamp(clip, dst)
             if progress:
                 progress(done, total, dst.name)
             continue
@@ -212,11 +306,26 @@ def import_clips(clips: list[Clip], library: str, progress=None, cancelled=None)
                 raise OSError(f"copy of {src} is the wrong size")
             shutil.copystat(src, tmp)
             os.replace(tmp, dst)
+            _stamp(clip, dst)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
         out[id(clip)].append(str(dst))
+    for c in clips:
+        if c.clock_fix and out[id(c)]:
+            save_clock(out[id(c)], c)
     return [out[id(c)] for c in clips]
+
+
+def _stamp(clip: Clip, dst: Path):
+    """With a clock fix, date the copied file by the corrected time (the
+    card's own timestamps are the camera's wrong clock)."""
+    if clip.clock_fix and clip.recorded is not None:
+        t = clip.recorded.timestamp()
+        try:
+            os.utime(dst, (t, t))
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------------------- logs ---
