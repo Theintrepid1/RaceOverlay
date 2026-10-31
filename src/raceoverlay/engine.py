@@ -7,7 +7,9 @@ default) each draw the gauges for a segment and run their own ffmpeg, so
 both the Python drawing and the video work spread across the CPU. Finished
 segments are kept on disk; a stopped or crashed render resumes by skipping
 them. At the end the segments are joined losslessly and the original audio
-is added once, so there are no clicks at the joins.
+is added once, so there are no clicks at the joins. Intro and end cards
+(raceoverlay.cards) are rendered as their own short clips with the same
+encoder settings and joined on either side, with silence under them.
 
 Only the gauges' screen areas are sent to ffmpeg (packed into a small
 "atlas" image and cropped back out), not full transparent frames.
@@ -34,6 +36,7 @@ from PIL import Image
 
 from racecore import osutil, telemetry
 
+from . import cards as cardmod
 from . import gauges, media
 from .render import OverlayContext, draw_overlay
 
@@ -69,6 +72,7 @@ class Job:
     g_flip: bool = False
     gauge_opts: dict | None = None
     overrides: dict | None = None
+    cards: dict | None = None     # raceoverlay.cards.Cards as a dict
 
     def __post_init__(self):
         self.outputs = [o if isinstance(o, Output) else Output(**o)
@@ -97,7 +101,7 @@ class Job:
             except OSError:
                 stamps.append([f, 0, 0])
         d["stamps"] = stamps
-        d["version"] = 4
+        d["version"] = 5
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
@@ -317,11 +321,40 @@ def _run_ffmpeg_progress(cmd: list[str], duration: float, report) -> tuple[int, 
     return proc.wait(), err
 
 
+def _make_cards(job: Job, info: media.MediaInfo, out: Output, fps: float,
+                ctx: OverlayContext | None) -> tuple[str | None, str | None]:
+    """Intro and end card clips for one output (kept in its work folder, so
+    a resumed render doesn't redo them)."""
+    spec = cardmod.Cards.from_dict(job.cards)
+    if not spec.any:
+        return None, None
+    wd = workdir_for(out.path)
+    w, h = output_size(info, job.height)
+    paths = []
+    for kind, t in (("intro", out.ranges[0][0]), ("end", out.ranges[-1][1] - 0.1)):
+        if not getattr(spec, kind):
+            paths.append(None)
+            continue
+        dest = wd / f"card_{kind}.mp4"
+        if not dest.exists():
+            frame = cardmod.grab_frame(info, t, w, h) if spec.bg == "blur" else None
+            st = cardmod.stats(ctx, out.ranges, job.offset) if (kind == "end" and ctx) else None
+            img = cardmod.card_image(kind, spec, w, h, frame, st, job.layout)
+            cardmod.encode(img, spec.seconds, fps, str(dest), job.encoder, job.quality)
+        paths.append(str(dest))
+    return paths[0], paths[1]
+
+
 def _finalize(job: Job, info: media.MediaInfo, out: Output,
-              segs: list[Segment], report=lambda f: None) -> None:
+              segs: list[Segment], report=lambda f: None,
+              cards: tuple[str | None, str | None] = (None, None)) -> None:
     wd = workdir_for(out.path)
     lst = wd / "segments.txt"
-    media.concat_list([s.path for s in segs], str(lst))
+    intro, end = cards
+    pre = cardmod.Cards.from_dict(job.cards).seconds if intro else 0.0
+    post = cardmod.Cards.from_dict(job.cards).seconds if end else 0.0
+    media.concat_list(([intro] if intro else []) + [s.path for s in segs]
+                      + ([end] if end else []), str(lst))
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-f", "concat", "-safe", "0", "-i", str(lst)]
     if info.has_audio:
@@ -332,10 +365,31 @@ def _finalize(job: Job, info: media.MediaInfo, out: Output,
             for path, ss, dur in info.spans(a, b - a):
                 acmd += ["-ss", f"{ss:.6f}", "-t", f"{dur:.6f}", "-i", path]
                 n += 1
-        graph = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
+        if pre or post:
+            # silence under the cards; the sound fades in after the intro
+            # and out before the end card, so it doesn't start or stop dead
+            fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
+            parts = [f"[{i}:a]{fmt}[r{i}]" for i in range(n)]
+            body = "".join(f"[r{i}]" for i in range(n))
+            body_s = sum(b - a for a, b in out.ranges)
+            fades = []
+            if pre:
+                fades.append(f"afade=t=in:d={cardmod.FADE_S}")
+            if post:
+                fades.append(f"afade=t=out:st={max(0.0, body_s - cardmod.FADE_S):.3f}"
+                             f":d={cardmod.FADE_S}")
+            parts.append(f"{body}concat=n={n}:v=0:a=1," + ",".join(fades) + "[body]")
+            for name, secs in (("pre", pre), ("post", post)):
+                if secs:
+                    parts.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{secs:.3f}[{name}]")
+            seq = (["[pre]"] if pre else []) + ["[body]"] + (["[post]"] if post else [])
+            parts.append("".join(seq) + f"concat=n={len(seq)}:v=0:a=1[a]")
+            graph = ";".join(parts)
+        else:
+            graph = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
         acmd += ["-filter_complex", graph, "-map", "[a]", "-c:a", "aac",
                  "-b:a", "192k", str(aud)]
-        total_s = sum(b - a for a, b in out.ranges)
+        total_s = sum(b - a for a, b in out.ranges) + pre + post
         rc, _ = _run_ffmpeg_progress(acmd, total_s, lambda f: report(0.7 * f))
         if rc == 0:
             cmd += ["-i", str(aud), "-map", "0:v", "-map", "1:a"]
@@ -347,7 +401,7 @@ def _finalize(job: Job, info: media.MediaInfo, out: Output,
     cmd += ["-c", "copy", "-movflags", "+faststart", tmp]
     base = 0.7 if info.has_audio else 0.0
     rc, err = _run_ffmpeg_progress(
-        cmd, sum(b - a for a, b in out.ranges),
+        cmd, sum(b - a for a, b in out.ranges) + pre + post,
         lambda f: report(base + (1 - base) * f))
     if rc != 0:
         raise RuntimeError(f"joining segments failed: {err.strip()[-600:]}")
@@ -434,9 +488,18 @@ def run(job: Job, progress=sys.stderr) -> list[str]:
                 progress.flush()
         return report
 
+    card_ctx = None
+    if cardmod.Cards.from_dict(job.cards).any:
+        progress.write("STAGE cards\n")
+        progress.flush()
+        tel = telemetry.load(job.csv, overrides=job.overrides,
+                             g_rotate=job.g_rotate, g_flip=job.g_flip)
+        card_ctx = OverlayContext.build(tel, use_mph=job.use_mph, style=job.style,
+                                        layout=job.layout, opts=job.gauge_opts)
     for oi, out in enumerate(job.outputs):
+        made = _make_cards(job, info, out, fps, card_ctx) if card_ctx else (None, None)
         _finalize(job, info, out, [s for s in segs if s.out_index == oi],
-                  report_for(oi))
+                  report_for(oi), made)
     progress.write(f"PROGRESS {total} {total} 0 0 0\nDONE\n")
     progress.flush()
     return [o.path for o in job.outputs]

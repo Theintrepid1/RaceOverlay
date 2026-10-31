@@ -26,6 +26,7 @@ import numpy as np
 
 from racecore import gosync, osutil, telemetry  # noqa: E402
 
+from . import cards as cardmod
 from . import gauges  # noqa: E402  (Qt imported in main/below)
 
 KMH_PER_MPH = 1.60934
@@ -1312,6 +1313,68 @@ class MainWindow(QtWidgets.QMainWindow):
         wl.addLayout(prow)
         pv.addWidget(what)
 
+        cbox, cl = _group("Title cards")
+        st = settings()
+        crow = QtWidgets.QHBoxLayout()
+        self.card_intro = _check("Intro card", st.value("cards/intro", False, type=bool),
+                                 lambda _on: self._cards_changed(),
+                                 "A few seconds before the footage: title, date, "
+                                 "driver and car, logos")
+        self.card_end = _check("End card", st.value("cards/end", False, type=bool),
+                               lambda _on: self._cards_changed(),
+                               "A few seconds after: best lap, laps, top speed, "
+                               "a thank-you line, logos")
+        crow.addWidget(self.card_intro)
+        crow.addWidget(self.card_end)
+        crow.addStretch(1)
+        cl.addLayout(crow)
+        self.card_form_w = QtWidgets.QWidget()
+        cf = QtWidgets.QFormLayout(self.card_form_w)
+        cf.setContentsMargins(0, 0, 0, 0)
+        self.card_secs = QtWidgets.QDoubleSpinBox()
+        self.card_secs.setRange(1.0, 15.0)
+        self.card_secs.setSingleStep(0.5)
+        self.card_secs.setSuffix(" s each")
+        self.card_secs.setValue(float(st.value("cards/seconds", 4.0)))
+        self.card_secs.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.card_secs.valueChanged.connect(lambda _v: self._cards_changed())
+        cf.addRow(_note("Length"), self.card_secs)
+        brow = QtWidgets.QHBoxLayout()
+        self.card_bg = QtWidgets.QComboBox()
+        self.card_bg.addItem("Blurred video", "blur")
+        self.card_bg.addItem("Solid color", "color")
+        self.card_bg.setCurrentIndex(max(0, self.card_bg.findData(st.value("cards/bg", "blur"))))
+        self.card_bg.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.card_bg.currentIndexChanged.connect(lambda _i: self._cards_changed())
+        self.card_color = st.value("cards/color", "#14171c")
+        self.card_color_btn = _btn("Color…", self._pick_card_color)
+        brow.addWidget(self.card_bg, 1)
+        brow.addWidget(self.card_color_btn)
+        cf.addRow(_note("Background"), brow)
+        self.card_edits = {}
+        for key, label, ph in (("title", "Title", "track name"),
+                               ("date", "Date", "recording date"),
+                               ("driver", "Driver", "e.g. Cam"),
+                               ("car", "Car", "e.g. BRZ #117"),
+                               ("thanks", "End line", "e.g. Thanks to our sponsors")):
+            e = QtWidgets.QLineEdit(st.value(f"cards/{key}", ""))
+            e.setPlaceholderText(ph)
+            e.editingFinished.connect(self._cards_changed)
+            cf.addRow(_note(label), e)
+            self.card_edits[key] = e
+        self.card_logos = _check("Logos on the cards", st.value("cards/logos", True, type=bool),
+                                 lambda _on: self._cards_changed(),
+                                 "The logos from the Look tab, in a row")
+        cf.addRow("", self.card_logos)
+        cf.addRow("", _btn("Preview cards", self._preview_cards,
+                           "See the cards as they'll look (first and last frame "
+                           "of this video)"))
+        cl.addWidget(self.card_form_w)
+        cl.addWidget(_note("Blank title and date fill in from the track and the "
+                           "recording. Cards are silent; the sound fades in after the "
+                           "intro.", small=True))
+        pv.addWidget(cbox)
+
         fmt, fml = _group("Format")
         form = QtWidgets.QFormLayout()
         self.res_pick = QtWidgets.QComboBox()
@@ -1378,6 +1441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(go)
         pv.addStretch(1)
         self._set_render_buttons()
+        self._cards_changed()
         return page
 
     def _build_look_tab(self):
@@ -1878,6 +1942,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.empty_lbl.setVisible(self.video_path is None)
         self._fill_lap_list()
         self._set_render_buttons()
+        if hasattr(self, "card_edits"):
+            QtCore.QTimer.singleShot(0, self._cards_changed)   # title/date hints
         if self.ctx and self.ctx.corners and self.ctx.corners.ok:
             cm = self.ctx.corners
             per = {}
@@ -2956,6 +3022,99 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_out_dir(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._out_dir())))
 
+    # ----- title cards -----
+
+    def _card_auto(self) -> dict:
+        """Title and date filled in from the data and video."""
+        out = {"title": "", "date": ""}
+        if self.telem is not None and self.ctx is not None:
+            tm = self.telem
+            lm = self.ctx.laps
+            t = lm.laps[1].start if lm is not None and lm.ok and len(lm.laps) > 1 else None
+            if t is not None and tm.has("gps_lat") and tm.has("gps_lon"):
+                try:
+                    from racecore import tracks
+                    p = tracks.find(tm.sample(t, "gps_lat"), tm.sample(t, "gps_lon"))
+                    out["title"] = p.name if p else ""
+                except Exception:  # noqa: BLE001 - just no title
+                    pass
+            if not out["title"] and self.csv_path:
+                from racecore import tracks
+                n = tracks.name_from_file(self.csv_path)
+                out["title"] = "" if n == "Track" else n
+        if self.parts:
+            from racecore import ingest
+            rec, _fix = ingest.recorded_for(self.parts)
+            if rec is None:
+                rec = ingest._probe(self.parts[0])[0]
+            if rec is not None and rec.year >= 2020:
+                out["date"] = cardmod.fmt_date(rec)
+        return out
+
+    def _cards_spec(self) -> cardmod.Cards:
+        auto = self._card_auto() if (self.card_intro.isChecked()) else {}
+        vals = {k: e.text().strip() for k, e in self.card_edits.items()}
+        for k in ("title", "date"):
+            if not vals[k]:
+                vals[k] = auto.get(k, "")
+        return cardmod.Cards(intro=self.card_intro.isChecked(), end=self.card_end.isChecked(),
+                             seconds=self.card_secs.value(), bg=self.card_bg.currentData(),
+                             color=self.card_color, logos=self.card_logos.isChecked(), **vals)
+
+    def _cards_changed(self):
+        st = settings()
+        st.setValue("cards/intro", self.card_intro.isChecked())
+        st.setValue("cards/end", self.card_end.isChecked())
+        st.setValue("cards/seconds", self.card_secs.value())
+        st.setValue("cards/bg", self.card_bg.currentData())
+        st.setValue("cards/color", self.card_color)
+        st.setValue("cards/logos", self.card_logos.isChecked())
+        for k, e in self.card_edits.items():
+            st.setValue(f"cards/{k}", e.text().strip())
+        on = self.card_intro.isChecked() or self.card_end.isChecked()
+        self.card_form_w.setVisible(on)
+        self.card_color_btn.setEnabled(self.card_bg.currentData() == "color")
+        if self.parts:
+            auto = self._card_auto()
+            for k in ("title", "date"):
+                self.card_edits[k].setPlaceholderText(
+                    auto[k] or ("track name" if k == "title" else "recording date"))
+
+    def _pick_card_color(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.card_color), self)
+        if c.isValid():
+            self.card_color = c.name()
+            self._cards_changed()
+
+    def _preview_cards(self):
+        if not self._ready():
+            return
+        spec = self._cards_spec()
+        spec.intro = spec.end = True
+        w, h = 960, int(round(960 * self.info.height / self.info.width / 2)) * 2
+        ranges = [[0.0, self.info.duration]]
+        shots = []
+        for kind, t in (("intro", 0.0), ("end", self.info.duration - 0.1)):
+            frame = cardmod.grab_frame(self.info, t, w, h) if spec.bg == "blur" else None
+            st = cardmod.stats(self.ctx, ranges, self.offset) if kind == "end" else None
+            shots.append(cardmod.card_image(kind, spec, w, h, frame, st, self.layout_))
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Title cards")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        for name, img in zip(("Intro", "End (for the whole video; a lap clip shows that "
+                                         "lap's numbers)"), shots):
+            lay.addWidget(_note(f"<b>{name}</b>"))
+            q = QtGui.QImage(img.tobytes(), img.width, img.height, img.width * 3,
+                             QtGui.QImage.Format_RGB888).copy()
+            lbl = QtWidgets.QLabel()
+            lbl.setPixmap(QtGui.QPixmap.fromImage(q).scaledToWidth(
+                640, QtCore.Qt.SmoothTransformation))
+            lay.addWidget(lbl)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.exec()
+
     def _make_job(self, outputs: list[dict], preview: bool) -> engine.Job:
         a = self.telem.g_align if self.telem.g_source == "raw" else {}
         hwdec = bool(self._hw and self._hw.get("hwdecode"))
@@ -2975,7 +3134,8 @@ class MainWindow(QtWidgets.QMainWindow):
             use_mph=self.use_mph, style=self.style_name, layout=self.layout_,
             invert_lat=self.invert_lat, invert_lon=self.invert_lon,
             g_rotate=a.get("angle"), g_flip=bool(a.get("flip", False)),
-            gauge_opts=self.gauge_opts, overrides=self.overrides or None)
+            gauge_opts=self.gauge_opts, overrides=self.overrides or None,
+            cards=None if preview else self._cards_spec().to_dict())
 
     def _render_preview(self):
         if not self._ready():
