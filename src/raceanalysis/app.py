@@ -25,7 +25,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from racecore import analysis, engine, gosync, ingest, telemetry, tracks
+from racecore import analysis, engine, gosync, ingest, osutil, telemetry, tracks
 from raceoverlay import media
 from raceoverlay.syncgui import force_qt_platform_for_native, pick_file, settings
 
@@ -916,13 +916,16 @@ def main(argv: list[str] | None = None) -> int:
     fmt.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
     restore_qpa = force_qt_platform_for_native()
+    osutil.set_app_id("analysis")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["raceanalysis"])
     restore_qpa()
-    app.setApplicationName("raceoverlay")  # share Race Overlay's settings
+    # its own name, so the desktop keeps its windows apart from Race Overlay's
+    # (X11 window class, Wayland app id); settings are shared by file name
+    app.setApplicationName("raceanalysis")
     from raceoverlay import __version__
     app.setApplicationDisplayName(f"Race Analysis {__version__}")
     app.setDesktopFileName("raceanalysis")
-    icon = Path(__file__).resolve().parent.parent / "raceoverlay" / "icon.svg"
+    icon = Path(__file__).resolve().parent.parent / "raceoverlay" / "icon_analysis.svg"
     if icon.exists():
         app.setWindowIcon(QtGui.QIcon(str(icon)))
     locale.setlocale(locale.LC_NUMERIC, "C")  # libmpv refuses other locales

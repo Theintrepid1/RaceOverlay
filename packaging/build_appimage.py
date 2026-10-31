@@ -162,6 +162,7 @@ def main():
            "--collect-submodules", "raceanalysis",
            "--add-data", f"{src / 'fonts'}:raceoverlay/fonts",
            "--add-data", f"{src / 'icon.svg'}:raceoverlay",
+           "--add-data", f"{src / 'icon_analysis.svg'}:raceoverlay",
            "--add-data", f"{ROOT / 'tracks'}:tracks",  # built-in track library
            "--hidden-import", "mpv",
            "--runtime-hook", str(ROOT / "packaging" / "raceoverlay_boot.py")]

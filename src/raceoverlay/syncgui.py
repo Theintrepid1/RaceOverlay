@@ -235,9 +235,10 @@ def add_menu_entry(appimage: str):
     base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     icon_dir = base / "icons" / "hicolor" / "scalable" / "apps"
     icon_dir.mkdir(parents=True, exist_ok=True)
-    src_icon = Path(__file__).with_name("icon.svg")
-    if src_icon.exists():
-        shutil.copyfile(src_icon, icon_dir / "raceoverlay.svg")
+    for src_name, name in (("icon.svg", "raceoverlay"), ("icon_analysis.svg", "raceanalysis")):
+        src_icon = Path(__file__).with_name(src_name)
+        if src_icon.exists():
+            shutil.copyfile(src_icon, icon_dir / f"{name}.svg")
     f = _desktop_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(
@@ -252,7 +253,7 @@ def add_menu_entry(appimage: str):
         "[Desktop Entry]\nType=Application\nName=Race Analysis\n"
         "GenericName=Lap Analysis\n"
         "Comment=Compare laps and sessions and find where the time goes\n"
-        f'Exec="{appimage}" --analysis %F\nIcon=raceoverlay\nTerminal=false\n'
+        f'Exec="{appimage}" --analysis %F\nIcon=raceanalysis\nTerminal=false\n'
         "Categories=AudioVideo;Video;\nMimeType=text/csv;\n"
         "StartupWMClass=raceanalysis\n", encoding="utf-8")
     for cmd in (["update-desktop-database", str(f.parent)],
@@ -3323,6 +3324,7 @@ def main(argv: list[str] | None = None) -> int:
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 
     restore_qpa = force_qt_platform_for_native()
+    osutil.set_app_id("overlay")
     app = QtWidgets.QApplication(["raceoverlay"])
     restore_qpa()  # programs we launch get the session's setting
     app.setApplicationName("raceoverlay")
