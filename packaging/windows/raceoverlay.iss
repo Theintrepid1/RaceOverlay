@@ -43,11 +43,13 @@ Source: "{#AppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cre
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Icons]
-Name: "{group}\Race Overlay"; Filename: "{app}\RaceOverlay.exe"; Comment: "Sync telemetry to video and render gauge overlays"
-Name: "{group}\Race Analysis"; Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; Comment: "Compare laps and sessions"
+; Each app has its own AppUserModelID (set again at startup, osutil.set_app_id),
+; so the two get separate taskbar buttons with their own icons.
+Name: "{group}\Race Overlay"; Filename: "{app}\RaceOverlay.exe"; Comment: "Sync telemetry to video and render gauge overlays"; AppUserModelID: "Theintrepid1.RaceOverlay"
+Name: "{group}\Race Analysis"; Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; IconFilename: "{app}\raceanalysis.ico"; Comment: "Compare laps and sessions"; AppUserModelID: "Theintrepid1.RaceAnalysis"
 Name: "{group}\Uninstall Race Overlay"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Race Overlay"; Filename: "{app}\RaceOverlay.exe"; Tasks: desktopicon
-Name: "{autodesktop}\Race Analysis"; Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; Tasks: desktopicon
+Name: "{autodesktop}\Race Overlay"; Filename: "{app}\RaceOverlay.exe"; Tasks: desktopicon; AppUserModelID: "Theintrepid1.RaceOverlay"
+Name: "{autodesktop}\Race Analysis"; Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; IconFilename: "{app}\raceanalysis.ico"; Tasks: desktopicon; AppUserModelID: "Theintrepid1.RaceAnalysis"
 
 [Run]
 Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; Description: "Start Race Analysis"; Flags: nowait postinstall skipifsilent unchecked

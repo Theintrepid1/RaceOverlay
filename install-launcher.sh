@@ -10,6 +10,7 @@ ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 chmod +x "$DIR/launch.sh"
 mkdir -p "$APPS" "$ICONS"
 cp "$DIR/raceoverlay.svg" "$ICONS/raceoverlay.svg"
+cp "$DIR/src/raceoverlay/icon_analysis.svg" "$ICONS/raceanalysis.svg"
 cat > "$APPS/raceoverlay.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
@@ -30,7 +31,7 @@ Name=Race Analysis
 GenericName=Lap Analysis
 Comment=Compare laps and sessions and find where the time goes
 Exec="$DIR/launch.sh" --analysis %F
-Icon=raceoverlay
+Icon=raceanalysis
 Terminal=false
 Categories=AudioVideo;Video;
 MimeType=text/csv;

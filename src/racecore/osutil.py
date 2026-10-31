@@ -36,6 +36,23 @@ def _win_dir(var: str, fallback: str) -> Path:
     return Path(os.environ.get(var) or (Path.home() / fallback))
 
 
+APP_IDS = {"overlay": "Theintrepid1.RaceOverlay", "analysis": "Theintrepid1.RaceAnalysis"}
+
+
+def set_app_id(which: str) -> None:
+    """Windows: give this process its own taskbar identity, so Race Overlay
+    and Race Analysis (the same .exe) get separate taskbar buttons and
+    icons. Matches the AppUserModelID on the installer's shortcuts. Call
+    before any window is created. Does nothing elsewhere."""
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_IDS[which])
+    except Exception:  # noqa: BLE001 - only cosmetic
+        pass
+
+
 def data_dir() -> Path:
     """Saved tracks and other things worth keeping.
     Linux ~/.local/share/raceoverlay, Windows %APPDATA%\\raceoverlay."""

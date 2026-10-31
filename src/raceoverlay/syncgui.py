@@ -26,6 +26,7 @@ import numpy as np
 
 from racecore import gosync, osutil, telemetry  # noqa: E402
 
+from . import cards as cardmod
 from . import gauges  # noqa: E402  (Qt imported in main/below)
 
 KMH_PER_MPH = 1.60934
@@ -234,9 +235,10 @@ def add_menu_entry(appimage: str):
     base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
     icon_dir = base / "icons" / "hicolor" / "scalable" / "apps"
     icon_dir.mkdir(parents=True, exist_ok=True)
-    src_icon = Path(__file__).with_name("icon.svg")
-    if src_icon.exists():
-        shutil.copyfile(src_icon, icon_dir / "raceoverlay.svg")
+    for src_name, name in (("icon.svg", "raceoverlay"), ("icon_analysis.svg", "raceanalysis")):
+        src_icon = Path(__file__).with_name(src_name)
+        if src_icon.exists():
+            shutil.copyfile(src_icon, icon_dir / f"{name}.svg")
     f = _desktop_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(
@@ -251,7 +253,7 @@ def add_menu_entry(appimage: str):
         "[Desktop Entry]\nType=Application\nName=Race Analysis\n"
         "GenericName=Lap Analysis\n"
         "Comment=Compare laps and sessions and find where the time goes\n"
-        f'Exec="{appimage}" --analysis %F\nIcon=raceoverlay\nTerminal=false\n'
+        f'Exec="{appimage}" --analysis %F\nIcon=raceanalysis\nTerminal=false\n'
         "Categories=AudioVideo;Video;\nMimeType=text/csv;\n"
         "StartupWMClass=raceanalysis\n", encoding="utf-8")
     for cmd in (["update-desktop-database", str(f.parent)],
@@ -797,6 +799,163 @@ class GaugeDialog(QtWidgets.QDialog):
                     self.lines.append(ln)
 
 
+def import_logo(path: str) -> tuple[str, float]:
+    """Copy a logo into gauges.logos_dir() (an SVG is drawn to a PNG first).
+    Returns (file name there, height / width)."""
+    import hashlib
+    from PIL import Image
+    src = Path(path)
+    data = src.read_bytes()
+    name = hashlib.sha1(data).hexdigest()[:16]
+    dest_dir = gauges.logos_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if src.suffix.lower() == ".svg":
+        from PySide6 import QtSvg
+        r = QtSvg.QSvgRenderer(str(src))
+        if not r.isValid():
+            raise ValueError("couldn't read this SVG")
+        sz = r.defaultSize()
+        w = 1200
+        h = max(1, int(round(w * sz.height() / max(1, sz.width()))))
+        img = QtGui.QImage(w, h, QtGui.QImage.Format_ARGB32)
+        img.fill(QtCore.Qt.transparent)
+        pa = QtGui.QPainter(img)
+        r.render(pa)
+        pa.end()
+        dest = dest_dir / f"{name}.png"
+        img.save(str(dest))
+    else:
+        im = Image.open(src)
+        im.load()
+        dest = dest_dir / f"{name}.png"
+        im.convert("RGBA").save(dest)
+    with Image.open(dest) as im:
+        return dest.name, im.height / max(1, im.width)
+
+
+class SimpleGaugeDialog(QtWidgets.QDialog):
+    """Logo or text gauge: a picture (PNG/SVG/JPG) with opacity, or a line
+    of text with a color."""
+
+    COLORS = [("White", "fg"), ("Accent (style color)", "accent")]
+
+    def __init__(self, parent, g: dict):
+        super().__init__(parent)
+        self.g = dict(g)
+        logo = g["type"] == "image"
+        self.setWindowTitle("Logo" if logo else "Text")
+        lay = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        lay.addLayout(form)
+        if logo:
+            row = QtWidgets.QHBoxLayout()
+            self.file_lbl = QtWidgets.QLabel("")
+            self.file_lbl.setWordWrap(True)
+            row.addWidget(self.file_lbl, 1)
+            row.addWidget(_btn("Choose…", self._choose))
+            form.addRow("Picture", row)
+            self.name_ed = QtWidgets.QLineEdit(g.get("label", ""))
+            self.name_ed.setPlaceholderText("e.g. sponsor name (for the list)")
+            form.addRow("Name", self.name_ed)
+            orow = QtWidgets.QHBoxLayout()
+            self.op = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            self.op.setRange(10, 100)
+            self.op.setValue(int(g.get("opacity", 100)))
+            self.op_lbl = QtWidgets.QLabel()
+            self.op.valueChanged.connect(lambda v: self.op_lbl.setText(f"{v}%"))
+            self.op_lbl.setText(f"{self.op.value()}%")
+            orow.addWidget(self.op, 1)
+            orow.addWidget(self.op_lbl)
+            form.addRow("Opacity", orow)
+            self.preview = QtWidgets.QLabel()
+            self.preview.setAlignment(QtCore.Qt.AlignCenter)
+            self.preview.setMinimumHeight(120)
+            self.preview.setStyleSheet("background:#3a4250; border-radius:6px;")
+            lay.addWidget(self.preview)
+            lay.addWidget(_note("PNG with a transparent background looks best. The "
+                                "picture is copied into the app, so it keeps working "
+                                "if the original moves. Drag it into place with "
+                                "\"Move && resize gauges\".", small=True))
+            self._show_file()
+        else:
+            self.text_ed = QtWidgets.QLineEdit(g.get("text", ""))
+            self.text_ed.setPlaceholderText("e.g. Beer City Racing  #117")
+            form.addRow("Text", self.text_ed)
+            crow = QtWidgets.QHBoxLayout()
+            self.color_cb = QtWidgets.QComboBox()
+            for t, v in self.COLORS:
+                self.color_cb.addItem(t, v)
+            col = g.get("color") or "fg"
+            if self.color_cb.findData(col) < 0:
+                self.color_cb.addItem(f"Custom {col}", col)
+            self.color_cb.setCurrentIndex(self.color_cb.findData(col))
+            crow.addWidget(self.color_cb, 1)
+            crow.addWidget(_btn("Pick…", self._pick_color))
+            form.addRow("Color", crow)
+            lay.addWidget(_note("Uses the overlay style's font and outline. Resize "
+                                "it with the mouse wheel in \"Move && resize "
+                                "gauges\".", small=True))
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(460, 0)
+
+    def _show_file(self):
+        p = gauges.logo_path(self.g.get("image", ""))
+        if p and Path(p).exists():
+            self.file_lbl.setText(self.g.get("label") or "Picture loaded")
+            pm = QtGui.QPixmap(str(p))
+            self.preview.setPixmap(pm.scaled(360, 120, QtCore.Qt.KeepAspectRatio,
+                                             QtCore.Qt.SmoothTransformation))
+        else:
+            self.file_lbl.setText("None yet" if not self.g.get("image") else
+                                  "The picture isn't on this computer; choose it again.")
+            self.preview.clear()
+
+    def _choose(self):
+        p = pick_file(self, "Logo picture", "logo",
+                      "Pictures (*.png *.svg *.jpg *.jpeg *.webp);;All files (*)")
+        if not p:
+            return
+        try:
+            name, aspect = import_logo(p)
+        except Exception as e:  # noqa: BLE001 - shown to the user
+            QtWidgets.QMessageBox.warning(self, "Can't use this picture", f"{p}\n\n{e}")
+            return
+        self.g.update(image=name, aspect=aspect)
+        if not self.name_ed.text().strip():
+            self.name_ed.setText(Path(p).stem)
+        self._show_file()
+
+    def _pick_color(self):
+        c = QtWidgets.QColorDialog.getColor(parent=self)
+        if c.isValid():
+            hx = c.name()
+            i = self.color_cb.findData(hx)
+            if i < 0:
+                self.color_cb.addItem(f"Custom {hx}", hx)
+                i = self.color_cb.count() - 1
+            self.color_cb.setCurrentIndex(i)
+
+    def _ok(self):
+        if self.g["type"] == "image":
+            if not self.g.get("image"):
+                QtWidgets.QMessageBox.information(self, "No picture", "Choose a picture first.")
+                return
+            self.g.update(label=self.name_ed.text().strip(), opacity=self.op.value())
+        else:
+            if not self.text_ed.text().strip():
+                QtWidgets.QMessageBox.information(self, "No text", "Type the text first.")
+                return
+            self.g.update(text=self.text_ed.text().strip(), color=self.color_cb.currentData())
+        self.accept()
+
+    def result_gauge(self) -> dict:
+        return gauges.normalize_gauge(self.g)
+
+
 class MergeDialog(QtWidgets.QDialog):
     """Pick several video files and put them in order."""
 
@@ -1155,6 +1314,68 @@ class MainWindow(QtWidgets.QMainWindow):
         wl.addLayout(prow)
         pv.addWidget(what)
 
+        cbox, cl = _group("Title cards")
+        st = settings()
+        crow = QtWidgets.QHBoxLayout()
+        self.card_intro = _check("Intro card", st.value("cards/intro", False, type=bool),
+                                 lambda _on: self._cards_changed(),
+                                 "A few seconds before the footage: title, date, "
+                                 "driver and car, logos")
+        self.card_end = _check("End card", st.value("cards/end", False, type=bool),
+                               lambda _on: self._cards_changed(),
+                               "A few seconds after: best lap, laps, top speed, "
+                               "a thank-you line, logos")
+        crow.addWidget(self.card_intro)
+        crow.addWidget(self.card_end)
+        crow.addStretch(1)
+        cl.addLayout(crow)
+        self.card_form_w = QtWidgets.QWidget()
+        cf = QtWidgets.QFormLayout(self.card_form_w)
+        cf.setContentsMargins(0, 0, 0, 0)
+        self.card_secs = QtWidgets.QDoubleSpinBox()
+        self.card_secs.setRange(1.0, 15.0)
+        self.card_secs.setSingleStep(0.5)
+        self.card_secs.setSuffix(" s each")
+        self.card_secs.setValue(float(st.value("cards/seconds", 4.0)))
+        self.card_secs.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.card_secs.valueChanged.connect(lambda _v: self._cards_changed())
+        cf.addRow(_note("Length"), self.card_secs)
+        brow = QtWidgets.QHBoxLayout()
+        self.card_bg = QtWidgets.QComboBox()
+        self.card_bg.addItem("Blurred video", "blur")
+        self.card_bg.addItem("Solid color", "color")
+        self.card_bg.setCurrentIndex(max(0, self.card_bg.findData(st.value("cards/bg", "blur"))))
+        self.card_bg.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.card_bg.currentIndexChanged.connect(lambda _i: self._cards_changed())
+        self.card_color = st.value("cards/color", "#14171c")
+        self.card_color_btn = _btn("Color…", self._pick_card_color)
+        brow.addWidget(self.card_bg, 1)
+        brow.addWidget(self.card_color_btn)
+        cf.addRow(_note("Background"), brow)
+        self.card_edits = {}
+        for key, label, ph in (("title", "Title", "track name"),
+                               ("date", "Date", "recording date"),
+                               ("driver", "Driver", "e.g. Cam"),
+                               ("car", "Car", "e.g. BRZ #117"),
+                               ("thanks", "End line", "e.g. Thanks to our sponsors")):
+            e = QtWidgets.QLineEdit(st.value(f"cards/{key}", ""))
+            e.setPlaceholderText(ph)
+            e.editingFinished.connect(self._cards_changed)
+            cf.addRow(_note(label), e)
+            self.card_edits[key] = e
+        self.card_logos = _check("Logos on the cards", st.value("cards/logos", True, type=bool),
+                                 lambda _on: self._cards_changed(),
+                                 "The logos from the Look tab, in a row")
+        cf.addRow("", self.card_logos)
+        cf.addRow("", _btn("Preview cards", self._preview_cards,
+                           "See the cards as they'll look (first and last frame "
+                           "of this video)"))
+        cl.addWidget(self.card_form_w)
+        cl.addWidget(_note("Blank title and date fill in from the track and the "
+                           "recording. Cards are silent; the sound fades in after the "
+                           "intro.", small=True))
+        pv.addWidget(cbox)
+
         fmt, fml = _group("Format")
         form = QtWidgets.QFormLayout()
         self.res_pick = QtWidgets.QComboBox()
@@ -1221,6 +1442,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(go)
         pv.addStretch(1)
         self._set_render_buttons()
+        self._cards_changed()
         return page
 
     def _build_look_tab(self):
@@ -1263,7 +1485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addWidget(self.edit_btn)
         gl.addWidget(_note("While on: drag gauges on the video, scroll the "
                            "mouse wheel over one to resize it.", small=True))
-        gl.addWidget(_note("<b>Data gauges</b> (pick any channel):"))
+        gl.addWidget(_note("<b>Your gauges</b> (any channel, logos, text):"))
         self.custom_list = QtWidgets.QListWidget()
         self.custom_list.setMinimumHeight(130)
         self.custom_list.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -1271,8 +1493,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.custom_list.itemDoubleClicked.connect(lambda _: self._edit_gauge())
         gl.addWidget(self.custom_list)
         crow = QtWidgets.QGridLayout()
-        for i, (text, slot) in enumerate((("Add…", self._add_gauge),
+        for i, (text, slot) in enumerate((("Add data gauge…", self._add_gauge),
                                           ("Edit…", self._edit_gauge),
+                                          ("Add logo…", lambda: self._add_simple("image")),
+                                          ("Add text…", lambda: self._add_simple("text")),
                                           ("Copy", self._dup_gauge),
                                           ("Delete", self._del_gauge))):
             crow.addWidget(_btn(text, slot), i // 2, i % 2)
@@ -1719,6 +1943,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.empty_lbl.setVisible(self.video_path is None)
         self._fill_lap_list()
         self._set_render_buttons()
+        if hasattr(self, "card_edits"):
+            QtCore.QTimer.singleShot(0, self._cards_changed)   # title/date hints
         if self.ctx and self.ctx.corners and self.ctx.corners.ok:
             cm = self.ctx.corners
             per = {}
@@ -1996,18 +2222,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.custom_list.blockSignals(True)
         self.custom_list.clear()
         for g in self.layout_.get("custom", []):
-            name = g.get("label") or src_label(self.telem, g["src"])
+            if g["type"] in gauges.DATA_TYPES:
+                name = g.get("label") or src_label(self.telem, g["src"])
+            else:
+                name = gauges.box_label(self.layout_, g["id"])
             text = f"{name}  ·  {gauges.GAUGE_TYPES[g['type']]}"
             ok = self.ctx is None or self.ctx.gauge_available(g)
             if not ok:
-                text += "   (no data)"
+                text += ("   (picture missing)" if g["type"] == "image" else "   (no data)")
             it = QtWidgets.QListWidgetItem(text)
             it.setData(QtCore.Qt.UserRole, g["id"])
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
             it.setCheckState(QtCore.Qt.Checked if g["on"] else QtCore.Qt.Unchecked)
             if not ok:
                 it.setForeground(QtGui.QBrush(QtGui.QColor(140, 140, 140)))
-                it.setToolTip(f"'{src_label(self.telem, g['src'])}' isn't in "
+                it.setToolTip("The picture isn't on this computer: Edit… and choose it "
+                              "again." if g["type"] == "image" else
+                              f"'{src_label(self.telem, g['src'])}' isn't in "
                               "this file, so this gauge is skipped.")
             self.custom_list.addItem(it)
         self.custom_list.blockSignals(False)
@@ -2046,8 +2277,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fill_custom_list()
             self.custom_list.setCurrentRow(self.custom_list.count() - 1)
 
+    def _add_simple(self, kind: str):
+        g = gauges.normalize_gauge(dict(id=gauges.new_gauge_id(self.layout_), type=kind,
+                                        color="fg", x=0.04 if kind == "image" else 0.40,
+                                        y=0.80 if kind == "image" else 0.05,
+                                        scale=0.8 if kind == "image" else 1.0))
+        dlg = SimpleGaugeDialog(self, g)
+        if dlg.exec():
+            self.layout_["custom"].append(dlg.result_gauge())
+            self._layout_changed()
+            self._fill_custom_list()
+            self.custom_list.setCurrentRow(self.custom_list.count() - 1)
+
     def _edit_gauge(self):
         g = self._selected_gauge()
+        if g is not None and g["type"] not in gauges.DATA_TYPES:
+            dlg = SimpleGaugeDialog(self, g)
+            if dlg.exec():
+                g.update(dlg.result_gauge())
+                self._layout_changed()
+                self._fill_custom_list()
+            return
         if g is None or not self._need_data():
             return
         dlg = GaugeDialog(self, self.ctx, g)
@@ -2773,6 +3023,99 @@ class MainWindow(QtWidgets.QMainWindow):
     def _open_out_dir(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._out_dir())))
 
+    # ----- title cards -----
+
+    def _card_auto(self) -> dict:
+        """Title and date filled in from the data and video."""
+        out = {"title": "", "date": ""}
+        if self.telem is not None and self.ctx is not None:
+            tm = self.telem
+            lm = self.ctx.laps
+            t = lm.laps[1].start if lm is not None and lm.ok and len(lm.laps) > 1 else None
+            if t is not None and tm.has("gps_lat") and tm.has("gps_lon"):
+                try:
+                    from racecore import tracks
+                    p = tracks.find(tm.sample(t, "gps_lat"), tm.sample(t, "gps_lon"))
+                    out["title"] = p.name if p else ""
+                except Exception:  # noqa: BLE001 - just no title
+                    pass
+            if not out["title"] and self.csv_path:
+                from racecore import tracks
+                n = tracks.name_from_file(self.csv_path)
+                out["title"] = "" if n == "Track" else n
+        if self.parts:
+            from racecore import ingest
+            rec, _fix = ingest.recorded_for(self.parts)
+            if rec is None:
+                rec = ingest._probe(self.parts[0])[0]
+            if rec is not None and rec.year >= 2020:
+                out["date"] = cardmod.fmt_date(rec)
+        return out
+
+    def _cards_spec(self) -> cardmod.Cards:
+        auto = self._card_auto() if (self.card_intro.isChecked()) else {}
+        vals = {k: e.text().strip() for k, e in self.card_edits.items()}
+        for k in ("title", "date"):
+            if not vals[k]:
+                vals[k] = auto.get(k, "")
+        return cardmod.Cards(intro=self.card_intro.isChecked(), end=self.card_end.isChecked(),
+                             seconds=self.card_secs.value(), bg=self.card_bg.currentData(),
+                             color=self.card_color, logos=self.card_logos.isChecked(), **vals)
+
+    def _cards_changed(self):
+        st = settings()
+        st.setValue("cards/intro", self.card_intro.isChecked())
+        st.setValue("cards/end", self.card_end.isChecked())
+        st.setValue("cards/seconds", self.card_secs.value())
+        st.setValue("cards/bg", self.card_bg.currentData())
+        st.setValue("cards/color", self.card_color)
+        st.setValue("cards/logos", self.card_logos.isChecked())
+        for k, e in self.card_edits.items():
+            st.setValue(f"cards/{k}", e.text().strip())
+        on = self.card_intro.isChecked() or self.card_end.isChecked()
+        self.card_form_w.setVisible(on)
+        self.card_color_btn.setEnabled(self.card_bg.currentData() == "color")
+        if self.parts:
+            auto = self._card_auto()
+            for k in ("title", "date"):
+                self.card_edits[k].setPlaceholderText(
+                    auto[k] or ("track name" if k == "title" else "recording date"))
+
+    def _pick_card_color(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self.card_color), self)
+        if c.isValid():
+            self.card_color = c.name()
+            self._cards_changed()
+
+    def _preview_cards(self):
+        if not self._ready():
+            return
+        spec = self._cards_spec()
+        spec.intro = spec.end = True
+        w, h = 960, int(round(960 * self.info.height / self.info.width / 2)) * 2
+        ranges = [[0.0, self.info.duration]]
+        shots = []
+        for kind, t in (("intro", 0.0), ("end", self.info.duration - 0.1)):
+            frame = cardmod.grab_frame(self.info, t, w, h) if spec.bg == "blur" else None
+            st = cardmod.stats(self.ctx, ranges, self.offset) if kind == "end" else None
+            shots.append(cardmod.card_image(kind, spec, w, h, frame, st, self.layout_))
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("Title cards")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        for name, img in zip(("Intro", "End (for the whole video; a lap clip shows that "
+                                         "lap's numbers)"), shots):
+            lay.addWidget(_note(f"<b>{name}</b>"))
+            q = QtGui.QImage(img.tobytes(), img.width, img.height, img.width * 3,
+                             QtGui.QImage.Format_RGB888).copy()
+            lbl = QtWidgets.QLabel()
+            lbl.setPixmap(QtGui.QPixmap.fromImage(q).scaledToWidth(
+                640, QtCore.Qt.SmoothTransformation))
+            lay.addWidget(lbl)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.exec()
+
     def _make_job(self, outputs: list[dict], preview: bool) -> engine.Job:
         a = self.telem.g_align if self.telem.g_source == "raw" else {}
         hwdec = bool(self._hw and self._hw.get("hwdecode"))
@@ -2792,7 +3135,8 @@ class MainWindow(QtWidgets.QMainWindow):
             use_mph=self.use_mph, style=self.style_name, layout=self.layout_,
             invert_lat=self.invert_lat, invert_lon=self.invert_lon,
             g_rotate=a.get("angle"), g_flip=bool(a.get("flip", False)),
-            gauge_opts=self.gauge_opts, overrides=self.overrides or None)
+            gauge_opts=self.gauge_opts, overrides=self.overrides or None,
+            cards=None if preview else self._cards_spec().to_dict())
 
     def _render_preview(self):
         if not self._ready():
@@ -2980,6 +3324,7 @@ def main(argv: list[str] | None = None) -> int:
     QtGui.QSurfaceFormat.setDefaultFormat(fmt)
 
     restore_qpa = force_qt_platform_for_native()
+    osutil.set_app_id("overlay")
     app = QtWidgets.QApplication(["raceoverlay"])
     restore_qpa()  # programs we launch get the session's setting
     app.setApplicationName("raceoverlay")

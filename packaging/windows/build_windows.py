@@ -41,12 +41,12 @@ def version() -> str:
     return re.search(r'__version__\s*=\s*"([^"]+)"', text).group(1)
 
 
-def make_icon(dest: Path) -> Path:
-    """icon.svg -> multi-size .ico (Qt draws the SVG, Pillow writes the ICO)."""
+def make_icon(dest: Path, svg: str = "icon.svg") -> Path:
+    """An app icon SVG -> multi-size .ico (Qt draws the SVG, Pillow writes the ICO)."""
     from PIL import Image
     from PySide6 import QtCore, QtGui, QtSvg
     app = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication(["x"])  # noqa: F841
-    r = QtSvg.QSvgRenderer(str(ROOT / "src" / "raceoverlay" / "icon.svg"))
+    r = QtSvg.QSvgRenderer(str(ROOT / "src" / "raceoverlay" / svg))
     img = QtGui.QImage(256, 256, QtGui.QImage.Format_ARGB32)
     img.fill(QtCore.Qt.transparent)
     p = QtGui.QPainter(img)
@@ -84,6 +84,7 @@ def main(argv=None) -> int:
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir(parents=True)
     icon = make_icon(WORK / "raceoverlay.ico")
+    icon_an = make_icon(WORK / "raceanalysis.ico", "icon_analysis.svg")
     src = ROOT / "src" / "raceoverlay"
     sep = os.pathsep  # ';' on Windows, for --add-data
     cmd = ["pyinstaller", "--noconfirm", "--clean", "--windowed",
@@ -95,6 +96,7 @@ def main(argv=None) -> int:
            "--collect-submodules", "raceanalysis",
            "--add-data", f"{src / 'fonts'}{sep}raceoverlay/fonts",
            "--add-data", f"{src / 'icon.svg'}{sep}raceoverlay",
+           "--add-data", f"{src / 'icon_analysis.svg'}{sep}raceoverlay",
            "--add-data", f"{ROOT / 'tracks'}{sep}tracks",
            "--add-binary", f"{BIN / 'ffmpeg.exe'}{sep}bin",
            "--add-binary", f"{BIN / 'ffprobe.exe'}{sep}bin",
@@ -106,6 +108,7 @@ def main(argv=None) -> int:
     run(cmd + [ROOT / "packaging" / "raceoverlay_app.py"])
 
     app = WORK / "dist" / "RaceOverlay"
+    shutil.copy2(icon_an, app / "raceanalysis.ico")   # for its shortcuts
     lic = app / "licenses"
     lic.mkdir(exist_ok=True)
     shutil.copy2(ROOT / "LICENSE", lic / "LICENSE-RaceOverlay.txt")
