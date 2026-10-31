@@ -1,7 +1,6 @@
 # Roadmap
 
-## Next — planned (see the project's change list, batches E–F)
-- Overlay: logo/image and text gauges; intro and end cards; separate app icons
+## Next — planned (see the project's change list, batch F)
 - Day tab: compare many sessions (consecutive / baseline) across several days
 
 ## Next — collecting ideas, not started
@@ -15,6 +14,8 @@
   sectors set on the Track tab (VIR Full ships with two lines; thirds when a
   track has none). Import fixes a GoPro clock that reset to 2016: one shift
   for every ticked recording, filled in from the GPS time when there's a fix.
+  Overlay logo and text gauges; optional intro and end cards (off by
+  default); separate icons and taskbar identities for the two apps.
 - **Next release (in PR, not released yet):** Race Analysis bugs and polish.
   APEX exports recognized in all three naming styles (short session names,
   ID-only files dated from the GoPro's GPS or typed start); tabs no longer
