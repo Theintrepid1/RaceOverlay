@@ -9,6 +9,14 @@
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **Next release (in PR, not released yet):**
+  - **Whole-video export trim:** From/To, with "Set to playhead".
+  - **File names** like `2026-09-27 VIR S1 lap5 2'19.806.mp4`.
+  - **Export finish:**
+    - Work files go to this computer's disk, and only the finished video is copied to the destination (one copy to a NAS, not three).
+    - Audio is pulled out during the render.
+    - Every step after the drawing is named, with a running time.
+    - Faststart is optional.
 - **v1.2.0** (2026-10-31):
   - **Race Analysis:**
     - APEX exports recognized in all three naming styles, with short session names.

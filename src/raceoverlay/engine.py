@@ -14,6 +14,14 @@ encoder settings and joined on either side, with silence under them.
 Only the gauges' screen areas are sent to ffmpeg (packed into a small
 "atlas" image and cropped back out), not full transparent frames.
 
+The chunks, the audio and the joined file are made in a work folder on
+this computer's own disk (when there's room), and only the finished video
+is copied to where it was asked for. Saving to a network share then costs
+one copy, not chunks + join + faststart all going over the network. The
+audio is pulled out while the gauges render. Every step after the
+rendering says what it's doing (STAGE lines; STEP lines when there's a
+fraction to show), so nothing sits at 100% without a word.
+
     python -m raceoverlay.engine job.json
 """
 from __future__ import annotations
@@ -73,6 +81,7 @@ class Job:
     gauge_opts: dict | None = None
     overrides: dict | None = None
     cards: dict | None = None     # raceoverlay.cards.Cards as a dict
+    faststart: bool = True        # index at the front (players start sooner)
 
     def __post_init__(self):
         self.outputs = [o if isinstance(o, Output) else Output(**o)
@@ -88,9 +97,10 @@ class Job:
             json.dump(asdict(self), fh, indent=1)
 
     def fingerprint(self, out: Output) -> str:
-        """Anything that changes the picture invalidates finished segments."""
+        """Anything that changes the picture invalidates finished segments.
+        (Cards and the audio are cached under names of their own.)"""
         d = asdict(self)
-        for k in ("outputs", "workers", "resume"):
+        for k in ("outputs", "workers", "resume", "cards", "faststart"):
             d.pop(k)
         d["out"] = asdict(out)
         stamps = []
@@ -101,7 +111,7 @@ class Job:
             except OSError:
                 stamps.append([f, 0, 0])
         d["stamps"] = stamps
-        d["version"] = 5
+        d["version"] = 6
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
@@ -116,9 +126,57 @@ def output_size(info: media.MediaInfo, height: int | None) -> tuple[int, int]:
     return w, int(h) // 2 * 2
 
 
-def workdir_for(out_path: str) -> Path:
+def _legacy_workdir(out_path: str) -> Path:
     p = Path(out_path)
     return p.with_name(f".{p.name}.parts")
+
+
+def _local_workdir(out_path: str) -> Path:
+    key = hashlib.sha1(os.path.abspath(out_path).encode()).hexdigest()[:16]
+    return osutil.cache_dir() / "renders" / key
+
+
+def workdir_for(out_path: str) -> Path:
+    """This output's work folder: an existing one (on this computer first,
+    then next to the output as older versions made), else where a new one
+    goes (see choose_workdir)."""
+    for d in (_local_workdir(out_path), _legacy_workdir(out_path)):
+        if d.exists():
+            return d
+    return _local_workdir(out_path)
+
+
+def _free(path: Path) -> int:
+    p = path
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return 0
+
+
+def estimate_bytes(info: media.MediaInfo, seconds: float) -> int:
+    """Rough size of a render of `seconds`: the source's own bitrate."""
+    total = 0
+    for p in info.paths:
+        try:
+            total += os.path.getsize(p)
+        except OSError:
+            pass
+    rate = total / info.duration if info.duration else 8e6
+    return int(rate * seconds)
+
+
+def choose_workdir(out: Output, info: media.MediaInfo) -> Path:
+    """Local work folder if this computer has room for the chunks plus the
+    joined file (about twice the video), else next to the output."""
+    for d in (_local_workdir(out.path), _legacy_workdir(out.path)):
+        if d.exists():
+            return d
+    need = 2 * estimate_bytes(info, sum(b - a for a, b in out.ranges)) + (512 << 20)
+    local = _local_workdir(out.path)
+    return local if _free(local.parent) >= need else _legacy_workdir(out.path)
 
 
 # ---------------------------------------------------------------- planning --
@@ -160,9 +218,9 @@ def plan(job: Job, fps: float) -> list[Segment]:
     return segs
 
 
-def prepare_workdirs(job: Job) -> None:
+def prepare_workdirs(job: Job, info: media.MediaInfo | None = None) -> None:
     for out in job.outputs:
-        wd = workdir_for(out.path)
+        wd = choose_workdir(out, info) if info is not None else workdir_for(out.path)
         fp = job.fingerprint(out)
         stamp = wd / "job.sha1"
         if wd.exists() and not (job.resume and stamp.exists()
@@ -171,6 +229,7 @@ def prepare_workdirs(job: Job) -> None:
         wd.mkdir(parents=True, exist_ok=True)
         osutil.hide_path(wd)  # ".name.parts" isn't hidden by name on Windows
         stamp.write_text(fp)
+        (wd / "output.txt").write_text(out.path, encoding="utf-8")   # for cleanup
 
 
 # ----------------------------------------------------------------- workers --
@@ -305,18 +364,29 @@ def _render_segment(seg_d: dict) -> int:
 
 # --------------------------------------------------------------- finishing --
 
-def _run_ffmpeg_progress(cmd: list[str], duration: float, report) -> tuple[int, str]:
-    """Run ffmpeg, calling report(fraction 0..1) as it goes (via -progress)."""
+def _run_ffmpeg_progress(cmd: list[str], duration: float, report,
+                         at_end=None) -> tuple[int, str]:
+    """Run ffmpeg, calling report(fraction 0..1) as it goes (via -progress).
+    at_end() is called once when the last frame has been written but
+    ffmpeg is still busy (the faststart rewrite happens then)."""
     cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True)
+    ended = False
     for line in proc.stdout:
         if line.startswith("out_time_us=") and duration > 0:
             try:
                 us = int(line.split("=", 1)[1])
             except ValueError:
                 continue
-            report(max(0.0, min(1.0, us / 1e6 / duration)))
+            f = max(0.0, min(1.0, us / 1e6 / duration))
+            report(f)
+            if f >= 0.999 and not ended and at_end:
+                ended = True
+                at_end()
+        elif line.startswith("progress=end") and not ended and at_end:
+            ended = True
+            at_end()
     err = proc.stderr.read()
     return proc.wait(), err
 
@@ -335,7 +405,10 @@ def _make_cards(job: Job, info: media.MediaInfo, out: Output, fps: float,
         if not getattr(spec, kind):
             paths.append(None)
             continue
-        dest = wd / f"card_{kind}.mp4"
+        key = hashlib.sha1(json.dumps([kind, spec.to_dict(), out.ranges, w, h, fps,
+                                       job.encoder, job.quality, job.layout],
+                                      sort_keys=True).encode()).hexdigest()[:12]
+        dest = wd / f"card_{kind}_{key}.mp4"
         if not dest.exists():
             frame = cardmod.grab_frame(info, t, w, h) if spec.bg == "blur" else None
             st = cardmod.stats(ctx, out.ranges, job.offset) if (kind == "end" and ctx) else None
@@ -345,68 +418,174 @@ def _make_cards(job: Job, info: media.MediaInfo, out: Output, fps: float,
     return paths[0], paths[1]
 
 
+def _card_secs(job: Job, cards: tuple[str | None, str | None]) -> tuple[float, float]:
+    spec = cardmod.Cards.from_dict(job.cards)
+    return (spec.seconds if cards[0] else 0.0, spec.seconds if cards[1] else 0.0)
+
+
+def _audio_cmd(info: media.MediaInfo, out: Output, pre: float, post: float,
+               dest: str) -> list[str]:
+    """The output's soundtrack: its ranges of the source audio joined, with
+    silence under the cards (fading in after the intro, out before the end)."""
+    acmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    n = 0
+    for a, b in out.ranges:
+        for path, ss, dur in info.spans(a, b - a):
+            acmd += ["-ss", f"{ss:.6f}", "-t", f"{dur:.6f}", "-i", path]
+            n += 1
+    if pre or post:
+        fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
+        parts = [f"[{i}:a]{fmt}[r{i}]" for i in range(n)]
+        body = "".join(f"[r{i}]" for i in range(n))
+        body_s = sum(b - a for a, b in out.ranges)
+        fades = []
+        if pre:
+            fades.append(f"afade=t=in:d={cardmod.FADE_S}")
+        if post:
+            fades.append(f"afade=t=out:st={max(0.0, body_s - cardmod.FADE_S):.3f}"
+                         f":d={cardmod.FADE_S}")
+        parts.append(f"{body}concat=n={n}:v=0:a=1," + ",".join(fades) + "[body]")
+        for name, secs in (("pre", pre), ("post", post)):
+            if secs:
+                parts.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{secs:.3f}[{name}]")
+        seq = (["[pre]"] if pre else []) + ["[body]"] + (["[post]"] if post else [])
+        parts.append("".join(seq) + f"concat=n={len(seq)}:v=0:a=1[a]")
+        graph = ";".join(parts)
+    else:
+        graph = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
+    return acmd + ["-filter_complex", graph, "-map", "[a]", "-c:a", "aac",
+                   "-b:a", "192k", dest]
+
+
+def _audio_path(job: Job, out: Output, pre: float, post: float) -> Path:
+    key = hashlib.sha1(json.dumps([out.ranges, pre, post, job.parts],
+                                  sort_keys=True).encode()).hexdigest()[:12]
+    return workdir_for(out.path) / f"audio_{key}.m4a"
+
+
+def start_audio(job: Job, info: media.MediaInfo, out: Output,
+                pre: float, post: float) -> subprocess.Popen | None:
+    """Pull this output's audio out in the background (while the gauges
+    render). None when there's no audio or it's already there."""
+    if not info.has_audio:
+        return None
+    dest = _audio_path(job, out, pre, post)
+    if dest.exists():
+        return None
+    tmp = str(dest) + ".tmp.m4a"
+    cmd = _audio_cmd(info, out, pre, post, tmp)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc._dest = (tmp, str(dest))       # type: ignore[attr-defined]
+    return proc
+
+
+def _finish_audio(proc) -> bool:
+    if proc is None:
+        return True
+    proc.stderr.read()
+    rc = proc.wait()
+    tmp, dest = proc._dest
+    if rc == 0:
+        os.replace(tmp, dest)
+        return True
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
+def _same_disk(a: Path, b: Path) -> bool:
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def _deliver(src: Path, dest: str, stage, step) -> None:
+    """Put the finished file where it was asked for: a rename on the same
+    disk, else one copy (with progress) to a temporary name, then a rename."""
+    d = Path(dest)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    if _same_disk(src, d.parent):
+        os.replace(src, d)
+        return
+    stage("copy", f"Copying to {d.parent}")
+    total = max(1, src.stat().st_size)
+    tmp = d.with_name(f".{d.name}.copying")
+    done, t0, last = 0, time.time(), 0.0
+    try:
+        with open(src, "rb") as fi, open(tmp, "wb") as fo:
+            while True:
+                buf = fi.read(16 << 20)
+                if not buf:
+                    break
+                fo.write(buf)
+                done += len(buf)
+                now = time.time()
+                if now - last >= 0.25 or done == total:
+                    last = now
+                    rate = done / max(1e-6, now - t0) / 1e6
+                    step(done / total, f"{done / 1e6:,.0f} of {total / 1e6:,.0f} MB, "
+                                       f"{rate:.0f} MB/s")
+        if tmp.stat().st_size != total:
+            raise OSError("the copy came out the wrong size")
+        os.replace(tmp, d)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    src.unlink()
+
+
 def _finalize(job: Job, info: media.MediaInfo, out: Output,
-              segs: list[Segment], report=lambda f: None,
-              cards: tuple[str | None, str | None] = (None, None)) -> None:
+              segs: list[Segment], stage, step,
+              cards: tuple[str | None, str | None] = (None, None),
+              audio_proc=None) -> None:
     wd = workdir_for(out.path)
     lst = wd / "segments.txt"
     intro, end = cards
-    pre = cardmod.Cards.from_dict(job.cards).seconds if intro else 0.0
-    post = cardmod.Cards.from_dict(job.cards).seconds if end else 0.0
+    pre, post = _card_secs(job, cards)
+    total_s = sum(b - a for a, b in out.ranges) + pre + post
     media.concat_list(([intro] if intro else []) + [s.path for s in segs]
                       + ([end] if end else []), str(lst))
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-f", "concat", "-safe", "0", "-i", str(lst)]
     if info.has_audio:
-        aud = wd / "audio.m4a"
-        acmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-        n = 0
-        for a, b in out.ranges:
-            for path, ss, dur in info.spans(a, b - a):
-                acmd += ["-ss", f"{ss:.6f}", "-t", f"{dur:.6f}", "-i", path]
-                n += 1
-        if pre or post:
-            # silence under the cards; the sound fades in after the intro
-            # and out before the end card, so it doesn't start or stop dead
-            fmt = "aformat=sample_rates=48000:channel_layouts=stereo"
-            parts = [f"[{i}:a]{fmt}[r{i}]" for i in range(n)]
-            body = "".join(f"[r{i}]" for i in range(n))
-            body_s = sum(b - a for a, b in out.ranges)
-            fades = []
-            if pre:
-                fades.append(f"afade=t=in:d={cardmod.FADE_S}")
-            if post:
-                fades.append(f"afade=t=out:st={max(0.0, body_s - cardmod.FADE_S):.3f}"
-                             f":d={cardmod.FADE_S}")
-            parts.append(f"{body}concat=n={n}:v=0:a=1," + ",".join(fades) + "[body]")
-            for name, secs in (("pre", pre), ("post", post)):
-                if secs:
-                    parts.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{secs:.3f}[{name}]")
-            seq = (["[pre]"] if pre else []) + ["[body]"] + (["[post]"] if post else [])
-            parts.append("".join(seq) + f"concat=n={len(seq)}:v=0:a=1[a]")
-            graph = ";".join(parts)
-        else:
-            graph = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
-        acmd += ["-filter_complex", graph, "-map", "[a]", "-c:a", "aac",
-                 "-b:a", "192k", str(aud)]
-        total_s = sum(b - a for a, b in out.ranges) + pre + post
-        rc, _ = _run_ffmpeg_progress(acmd, total_s, lambda f: report(0.7 * f))
-        if rc == 0:
+        aud = _audio_path(job, out, pre, post)
+        if audio_proc is not None and audio_proc.poll() is None:
+            stage("audio", "Collecting the audio (it was started with the render)")
+        ok = _finish_audio(audio_proc) if audio_proc is not None else aud.exists()
+        if not ok or not aud.exists():          # not started, or it failed: do it now
+            stage("audio", "Collecting the audio")
+            tmp = str(aud) + ".tmp.m4a"
+            rc, _ = _run_ffmpeg_progress(_audio_cmd(info, out, pre, post, tmp), total_s,
+                                         lambda f: step(f, ""))
+            if rc == 0:
+                os.replace(tmp, aud)
+        if aud.exists():
             cmd += ["-i", str(aud), "-map", "0:v", "-map", "1:a"]
         else:
             cmd += ["-map", "0:v"]
     else:
         cmd += ["-map", "0:v"]
-    tmp = out.path + ".tmp.mp4"
-    cmd += ["-c", "copy", "-movflags", "+faststart", tmp]
-    base = 0.7 if info.has_audio else 0.0
+    final = wd / ("final" + Path(out.path).suffix)
+    cmd += ["-c", "copy"]
+    if job.faststart:
+        cmd += ["-movflags", "+faststart"]
+    cmd += [str(final)]
+    stage("join", "Writing the final file")
     rc, err = _run_ffmpeg_progress(
-        cmd, sum(b - a for a, b in out.ranges) + pre + post,
-        lambda f: report(base + (1 - base) * f))
+        cmd, total_s, lambda f: step(f, ""),
+        at_end=(lambda: stage("faststart", "Optimizing for playback (moving the "
+                                           "index to the front)"))
+        if job.faststart else None)
     if rc != 0:
         raise RuntimeError(f"joining segments failed: {err.strip()[-600:]}")
-    report(1.0)
-    os.replace(tmp, out.path)
+    _deliver(final, out.path, stage, step)
+    stage("cleanup", "Cleaning up the work files")
     shutil.rmtree(wd, ignore_errors=True)
 
 
@@ -420,12 +599,57 @@ def _fmt_eta(s: float) -> str:
         else f"{s // 60}:{s % 60:02d}"
 
 
+def _render_all(job: Job, info: media.MediaInfo, fps: float, pending, already: int,
+                total: int, progress, stage) -> None:
+    """Draw the gauges for every unfinished segment, in parallel."""
+    if not pending:
+        return
+    ctx = mp.get_context("spawn")
+    counter = ctx.Value("q", 0)
+    hist = collections.deque(maxlen=20)
+    finishing = [False]
+    t0 = time.time()
+    with ProcessPoolExecutor(max_workers=min(job.workers, len(pending)),
+                             mp_context=ctx, initializer=_init_worker,
+                             initargs=(asdict(job), info.to_dict(), fps,
+                                       counter)) as ex:
+        futs = [ex.submit(_render_segment, asdict(s)) for s in pending]
+        while True:
+            done, not_done = wait(futs, timeout=0.5,
+                                  return_when=FIRST_EXCEPTION)
+            for f in done:
+                if f.exception():
+                    for g in not_done:
+                        g.cancel()
+                    raise f.exception()
+            now = time.time()
+            n = already + counter.value
+            hist.append((now, n))
+            rate = 0.0
+            if len(hist) >= 2 and hist[-1][0] > hist[0][0]:
+                rate = (hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0])
+            eta = (total - n) / rate if rate > 0 else float("inf")
+            if n >= total and not_done and not finishing[0]:
+                finishing[0] = True
+                stage("finishing", "Finishing the last chunks")
+            progress.write(f"PROGRESS {n} {total} {rate:.1f} "
+                           f"{rate / fps:.3f} {eta:.0f}\n")
+            if progress.isatty():
+                progress.write(f"\r  {100 * n / total:5.1f}%  {rate:6.1f} fps  "
+                               f"{rate / fps:4.2f}x realtime  "
+                               f"{_fmt_eta(eta)} left ")
+            progress.flush()
+            if not not_done:
+                break
+    progress.write(f"INFO rendered in {time.time() - t0:.1f}s\n")
+
+
 def run(job: Job, progress=sys.stderr) -> list[str]:
     info = media.probe(job.parts)
     fps = min(job.fps or info.fps, info.fps)
     if job.workers <= 0:
         job.workers = default_workers()
-    prepare_workdirs(job)
+    prepare_workdirs(job, info)
     segs = plan(job, fps)
     pending = [s for s in segs if not s.done]
     total = sum(s.frames for s in segs)
@@ -433,73 +657,55 @@ def run(job: Job, progress=sys.stderr) -> list[str]:
     w, h = output_size(info, job.height)
     progress.write(f"INFO {w}x{h} {fps:.3f}fps {job.encoder} "
                    f"workers={job.workers} segments={len(segs)} "
-                   f"resumed={len(segs) - len(pending)}\n")
+                   f"resumed={len(segs) - len(pending)} "
+                   f"work={workdir_for(job.outputs[0].path)}\n")
     progress.flush()
 
-    if pending:
-        ctx = mp.get_context("spawn")
-        counter = ctx.Value("q", 0)
-        hist = collections.deque(maxlen=20)
-        t0 = time.time()
-        with ProcessPoolExecutor(max_workers=min(job.workers, len(pending)),
-                                 mp_context=ctx, initializer=_init_worker,
-                                 initargs=(asdict(job), info.to_dict(), fps,
-                                           counter)) as ex:
-            futs = [ex.submit(_render_segment, asdict(s)) for s in pending]
-            while True:
-                done, not_done = wait(futs, timeout=0.5,
-                                      return_when=FIRST_EXCEPTION)
-                for f in done:
-                    if f.exception():
-                        for g in not_done:
-                            g.cancel()
-                        raise f.exception()
-                now = time.time()
-                n = already + counter.value
-                hist.append((now, n))
-                rate = 0.0
-                if len(hist) >= 2 and hist[-1][0] > hist[0][0]:
-                    rate = (hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0])
-                eta = (total - n) / rate if rate > 0 else float("inf")
-                progress.write(f"PROGRESS {n} {total} {rate:.1f} "
-                               f"{rate / fps:.3f} {eta:.0f}\n")
-                if progress.isatty():
-                    progress.write(f"\r  {100 * n / total:5.1f}%  {rate:6.1f} fps  "
-                                   f"{rate / fps:4.2f}x realtime  "
-                                   f"{_fmt_eta(eta)} left ")
-                progress.flush()
-                if not not_done:
-                    break
-        progress.write(f"INFO rendered in {time.time() - t0:.1f}s\n")
+    def stage(key: str, text: str):
+        progress.write(f"STAGE {key}\t{text}\n")
+        if progress.isatty():
+            progress.write(f"\n  {text}…\n")
+        progress.flush()
 
-    progress.write("STAGE joining\n")
-    progress.flush()
-    n_out = len(job.outputs)
-    last = [-1.0]
+    def step_for(oi: int, n_out: int):
+        last = [-1.0]
 
-    def report_for(oi):
-        def report(f):
-            overall = (oi + f) / n_out
-            if overall - last[0] >= 0.005 or f >= 1.0:  # don't spam
-                last[0] = overall
-                progress.write(f"JOIN {overall:.4f} {oi + 1} {n_out}\n")
+        def step(f: float, detail: str = ""):
+            if f - last[0] >= 0.005 or f >= 1.0 or detail:
+                last[0] = f
+                files = f"\tfile {oi + 1} of {n_out}" if n_out > 1 else "\t"
+                progress.write(f"STEP {f:.4f}{files}\t{detail}\n")
                 if progress.isatty():
-                    progress.write(f"\r  joining {100 * overall:5.1f}%      ")
+                    progress.write(f"\r  {100 * f:5.1f}%  {detail}      ")
                 progress.flush()
-        return report
+        return step
+
+    # the audio needs no picture: start pulling it out now, alongside the render
+    spec = cardmod.Cards.from_dict(job.cards)
+    audio = [start_audio(job, info, o, spec.seconds if spec.intro else 0.0,
+                         spec.seconds if spec.end else 0.0)
+             for o in job.outputs]
+
+    try:
+        _render_all(job, info, fps, pending, already, total, progress, stage)
+    except BaseException:
+        for p in audio:                 # don't leave audio jobs running
+            if p is not None and p.poll() is None:
+                p.kill()
+        raise
 
     card_ctx = None
-    if cardmod.Cards.from_dict(job.cards).any:
-        progress.write("STAGE cards\n")
-        progress.flush()
+    if spec.any:
+        stage("cards", "Making the title cards")
         tel = telemetry.load(job.csv, overrides=job.overrides,
                              g_rotate=job.g_rotate, g_flip=job.g_flip)
         card_ctx = OverlayContext.build(tel, use_mph=job.use_mph, style=job.style,
                                         layout=job.layout, opts=job.gauge_opts)
+    n_out = len(job.outputs)
     for oi, out in enumerate(job.outputs):
         made = _make_cards(job, info, out, fps, card_ctx) if card_ctx else (None, None)
         _finalize(job, info, out, [s for s in segs if s.out_index == oi],
-                  report_for(oi), made)
+                  stage, step_for(oi, n_out), made, audio[oi])
     progress.write(f"PROGRESS {total} {total} 0 0 0\nDONE\n")
     progress.flush()
     return [o.path for o in job.outputs]

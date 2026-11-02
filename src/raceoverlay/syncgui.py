@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -27,6 +28,7 @@ import numpy as np
 from racecore import gosync, osutil, telemetry  # noqa: E402
 
 from . import cards as cardmod
+from . import naming
 from . import gauges  # noqa: E402  (Qt imported in main/below)
 
 KMH_PER_MPH = 1.60934
@@ -91,9 +93,13 @@ def load_sync(video: str) -> dict:
 
 
 def save_sync(video: str, data: dict) -> Path | None:
+    """Write the sidecar, keeping keys this window doesn't manage (e.g. the
+    corrected recording time Race Analysis's import saves there)."""
     p = sync_path(video)
+    merged = load_sync(video)
+    merged.update(data)
     try:
-        p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        p.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     except OSError:
         return None  # read-only share etc.: keep working, just don't persist
     return p
@@ -556,6 +562,36 @@ def src_label(tel, src: str) -> str:
     if src.startswith("col:"):
         return src[4:]
     return telemetry.ROLE_LABELS.get(src, src)
+
+
+class TimeSpin(QtWidgets.QDoubleSpinBox):
+    """Seconds shown and typed as m:ss.s (plain seconds also accepted)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDecimals(1)
+        self.setSingleStep(1.0)
+        self.setKeyboardTracking(False)
+        self.setFocusPolicy(QtCore.Qt.ClickFocus)
+
+    def textFromValue(self, v: float) -> str:  # noqa: N802 - Qt name
+        m, sec = divmod(max(0.0, v), 60)
+        return f"{int(m)}:{sec:04.1f}"
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802
+        t = text.strip()
+        try:
+            if ":" in t:
+                m, sec = t.split(":", 1)
+                return int(m or 0) * 60 + float(sec or 0)
+            return float(t)
+        except ValueError:
+            return self.value()
+
+    def validate(self, text, pos):
+        ok = re.fullmatch(r"\s*\d*(:\d{0,2}(\.\d?)?)?\s*|\s*\d*\.?\d*\s*", text)
+        st = QtGui.QValidator.Acceptable if ok else QtGui.QValidator.Invalid
+        return st, text, pos
 
 
 class GaugeDialog(QtWidgets.QDialog):
@@ -1049,6 +1085,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.overrides: dict[str, str] = {}  # role -> column ("" = unused)
         self.proc = None
         self.parts: list[str] = []
+        self.trim: tuple[float, float] | None = None   # whole-video export range
+        self._stage, self._stage_t0, self._stage_detail = "", 0.0, ""
+        self._stage_timer = QtCore.QTimer(self)
+        self._stage_timer.timeout.connect(self._show_stage)
+        self._stage_timer.start(1000)
         self._paused = False
         self._job_outputs: list[str] = []
         self._job_preview = False
@@ -1287,6 +1328,46 @@ class MainWindow(QtWidgets.QMainWindow):
             rb.setFocusPolicy(QtCore.Qt.NoFocus)
             rb.toggled.connect(lambda _: self._export_changed())
             wl.addWidget(rb)
+            if rb is self.rb_whole:
+                # cut off the paddock drive / false grid at the start, etc.,
+                # tucked behind a button
+                self.trim_btn = QtWidgets.QToolButton()
+                self.trim_btn.setText("Trim ends")
+                self.trim_btn.setCheckable(True)
+                self.trim_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+                self.trim_btn.setArrowType(QtCore.Qt.RightArrow)
+                self.trim_btn.setAutoRaise(True)
+                self.trim_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+                self.trim_btn.setToolTip("Cut the start and end of the whole-video "
+                                         "export (paddock, false grid, cool-down)")
+                self.trim_btn.toggled.connect(self._trim_toggled)
+                trow = QtWidgets.QHBoxLayout()
+                trow.setContentsMargins(18, 0, 0, 0)
+                trow.addWidget(self.trim_btn)
+                trow.addStretch(1)
+                wl.addLayout(trow)
+                self.trim_w = QtWidgets.QWidget()
+                self.trim_w.setVisible(False)
+                tg = QtWidgets.QGridLayout(self.trim_w)
+                tg.setContentsMargins(22, 0, 0, 4)
+                self.trim_a, self.trim_b = TimeSpin(), TimeSpin()
+                for row, (lbl, spin, tip) in enumerate((
+                        ("From", self.trim_a, "Where the export starts (e.g. after "
+                                              "the paddock and false grid)"),
+                        ("To", self.trim_b, "Where the export ends"))):
+                    tg.addWidget(_note(lbl), row, 0)
+                    spin.setToolTip(tip)
+                    spin.valueChanged.connect(lambda _v: self._trim_changed())
+                    tg.addWidget(spin, row, 1)
+                    tg.addWidget(_btn("Set to playhead",
+                                      lambda _=False, w=row: self._trim_to_playhead(w),
+                                      "Use the current video position"), row, 2)
+                tg.addWidget(_btn("Whole length", self._trim_reset,
+                                  "Export from the very start to the very end"), 0, 3, 2, 1)
+                tg.setColumnStretch(4, 1)
+                self.trim_note = _note("", small=True)
+                tg.addWidget(self.trim_note, 2, 0, 1, 5)
+                wl.addWidget(self.trim_w)
         self.lap_list = QtWidgets.QListWidget()
         self.lap_list.setMaximumHeight(150)
         self.lap_list.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -1403,11 +1484,23 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(_note("Encoder"), self.enc_pick)
         form.addRow(_note("Parallel jobs"), self.workers_spin)
         fml.addLayout(form)
+        self.faststart_box = _check(
+            "Optimize for playback (faststart)",
+            settings().value("export/faststart", True, type=bool),
+            lambda on: settings().setValue("export/faststart", on),
+            "Puts the video's index at the front so players start right away. "
+            "Costs one extra pass over the finished file at the end (on this "
+            "computer's disk). YouTube doesn't need it.")
+        fml.addWidget(self.faststart_box)
         pv.addWidget(fmt)
 
         dest, dl = _group("Save to")
         self.out_lbl = _note("")
         dl.addWidget(self.out_lbl)
+        self.name_lbl = _note("", small=True)
+        self.name_lbl.setWordWrap(True)
+        self.name_lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        dl.addWidget(self.name_lbl)
         drow = QtWidgets.QHBoxLayout()
         drow.addWidget(_btn("Change…", self._choose_out_dir))
         drow.addWidget(_btn("Next to video", self._out_next_to_video))
@@ -1781,6 +1874,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.g_manual = None
         if saved.get("g_rotate") is not None and not saved.get("g_auto", True):
             self.g_manual = (float(saved["g_rotate"]), bool(saved.get("g_flip")))
+        self._load_trim(saved)
         self._sync_look_widgets()
 
         csv = saved.get("csv")
@@ -2812,7 +2906,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "invert_lon": self.invert_lon,
                 "gauge_opts": self.gauge_opts,
                 "overrides": self.overrides,
-                "use_mph": self.use_mph}
+                "use_mph": self.use_mph,
+                "trim": list(self.trim) if getattr(self, "trim", None) else None}
 
     def _save(self, quiet: bool = False):
         if self.video_path is None:
@@ -2933,13 +3028,118 @@ class MainWindow(QtWidgets.QMainWindow):
             return Path(media.merged_name(self.parts)).stem.replace("_merged", "")
         return Path(self.parts[0]).stem
 
+    # ----- recording facts (names and title cards) -----
+
+    def _facts(self) -> dict:
+        """Track name, date and session number of the open video and data,
+        worked out once per video/data pair (it probes the video)."""
+        key = (tuple(self.parts), self.csv_path, id(self.ctx))
+        if getattr(self, "_facts_key", None) == key:
+            return self._facts_val
+        out = {"track": "", "date": None, "session": None}
+        from racecore import ingest, tracks
+        if self.telem is not None and self.ctx is not None:
+            tm, lm = self.telem, self.ctx.laps
+            t = lm.laps[1].start if lm is not None and lm.ok and len(lm.laps) > 1 else None
+            if t is not None and tm.has("gps_lat") and tm.has("gps_lon"):
+                try:
+                    p = tracks.find(tm.sample(t, "gps_lat"), tm.sample(t, "gps_lon"))
+                    out["track"] = p.name if p else ""
+                except Exception:  # noqa: BLE001 - just no name
+                    pass
+        lg = ingest.log_info(self.csv_path) if self.csv_path else None
+        if not out["track"] and self.csv_path:
+            n = tracks.name_from_file(self.csv_path)
+            out["track"] = "" if n == "Track" else n
+        if lg is not None and not lg.guessed and lg.session:
+            out["session"] = lg.session
+        if self.parts:
+            rec, _fix = ingest.recorded_for(self.parts)
+            if rec is None:
+                rec = ingest._probe(self.parts[0])[0]
+            if rec is not None and rec.year >= 2020:
+                out["date"] = rec.date()
+        if out["date"] is None and lg is not None and not lg.guessed:
+            out["date"] = lg.date
+        self._facts_key, self._facts_val = key, out
+        return out
+
+    def _name_base(self) -> str:
+        f = self._facts()
+        return naming.base(f["date"], f["track"], f["session"], self._stem())
+
+    # ----- trim (whole video) -----
+
+    def _trim_range(self) -> tuple[float, float]:
+        dur = self.info.duration if self.info is not None else 0.0
+        a, b = getattr(self, "trim", None) or (0.0, dur)
+        a = max(0.0, min(a, dur))
+        b = max(a + 0.5, min(b, dur)) if dur > 0.5 else dur
+        return a, min(b, dur)
+
+    def _load_trim(self, saved: dict):
+        t = saved.get("trim")
+        self.trim = (float(t[0]), float(t[1])) if isinstance(t, list) and len(t) == 2 else None
+        self._show_trim()
+
+    def _show_trim(self):
+        if not hasattr(self, "trim_a") or self.info is None:
+            return
+        dur = self.info.duration
+        a, b = self._trim_range()
+        for w, v in ((self.trim_a, a), (self.trim_b, b)):
+            w.blockSignals(True)
+            w.setRange(0.0, dur)
+            w.setValue(v)
+            w.blockSignals(False)
+        cut = a + (dur - b)
+        self.trim_btn.setText(f"Trim ends  (on: keeps {fmt_t(b - a).split('.')[0]})"
+                              if cut > 0.05 else "Trim ends")
+        self.trim_note.setText(f"Exports {fmt_t(b - a).split('.')[0]} of "
+                               f"{fmt_t(dur).split('.')[0]}" + (
+                                   f" (cutting {fmt_t(a).split('.')[0]} at the start, "
+                                   f"{fmt_t(dur - b).split('.')[0]} at the end)"
+                                   if cut > 0.05 else ""))
+
+    def _trim_toggled(self, on: bool):
+        self.trim_btn.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.trim_w.setVisible(on)
+
+    def _trim_changed(self):
+        if self.info is None:
+            return
+        a, b = self.trim_a.value(), self.trim_b.value()
+        if b <= a + 0.5:                          # keep at least half a second
+            if self.sender() is self.trim_a:
+                a = max(0.0, b - 0.5)
+            else:
+                b = min(self.info.duration, a + 0.5)
+        full = a < 0.05 and b > self.info.duration - 0.05
+        self.trim = None if full else (round(a, 2), round(b, 2))
+        self._show_trim()
+        if self.video_path:
+            self._save(quiet=True)
+        self._export_changed()
+
+    def _trim_to_playhead(self, which: int):
+        if self.info is None:
+            return
+        (self.trim_a if which == 0 else self.trim_b).setValue(self._vt())
+
+    def _trim_reset(self):
+        self.trim = None
+        self._show_trim()
+        if self.video_path:
+            self._save(quiet=True)
+        self._export_changed()
+
     def _planned_outputs(self) -> list[dict]:
         if self.info is None:
             return []
-        d, stem = self._out_dir(), self._stem()
+        d, b = self._out_dir(), self._name_base()
         if self.rb_whole.isChecked():
-            return [{"path": str(d / f"{stem}_overlay.mp4"),
-                     "ranges": [[0.0, self.info.duration]]}]
+            a, e = self._trim_range()
+            return [{"path": str(d / naming.whole(b)), "ranges": [[a, e]]}]
         chosen = {self.lap_list.item(i).data(QtCore.Qt.UserRole)
                   for i in range(self.lap_list.count())
                   if self.lap_list.item(i).checkState() == QtCore.Qt.Checked}
@@ -2949,12 +3149,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return []
         durs = {n: dd for n, _, dd in self.laps}
         if self.rb_split.isChecked():
-            outs = []
-            for n, r in laps:
-                m, sec = divmod(durs[n], 60)
-                outs.append({"path": str(d / f"{stem}_lap{n}_{int(m)}m{sec:04.1f}.mp4"),
-                             "ranges": [r]})
-            return outs
+            return [{"path": str(d / naming.lap(b, n, durs[n])), "ranges": [r]}
+                    for n, r in laps]
         merged = []
         for _, r in sorted(laps, key=lambda x: x[1][0]):
             if merged and r[0] <= merged[-1][1]:
@@ -2962,9 +3158,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 merged.append(list(r))
         ns = [n for n, _ in laps]
-        name = f"{stem}_laps_{ns[0]}-{ns[-1]}" if len(ns) > 2 else \
-            f"{stem}_laps_{'_'.join(map(str, ns))}"
-        return [{"path": str(d / f"{name}.mp4"), "ranges": merged}]
+        return [{"path": str(d / naming.laps(b, ns)), "ranges": merged}]
 
     def _export_changed(self):
         if not hasattr(self, "rb_laps"):
@@ -2982,9 +3176,17 @@ class MainWindow(QtWidgets.QMainWindow):
         laps_mode = self.rb_laps.isChecked()
         for w in (self.lap_list, self.rb_split, self.rb_join, self.pad_spin):
             w.setEnabled(laps_mode)
+        self.trim_w.setEnabled(not laps_mode and self.info is not None)
+        self.trim_btn.setEnabled(not laps_mode and self.info is not None)
         if laps_mode and self.sender() is self.pad_spin:
             self._fill_lap_list()
         self.out_lbl.setText(str(self._out_dir()))
+        outs = self._planned_outputs() if self.info is not None else []
+        names = [Path(o["path"]).name for o in outs]
+        self.name_lbl.setText(("File: " if len(names) == 1 else f"{len(names)} files: ")
+                              + ", ".join(names[:3])
+                              + (f", and {len(names) - 3} more" if len(names) > 3 else "")
+                              if names else "")
         self._set_render_buttons()
 
     def _set_render_buttons(self):
@@ -3027,30 +3229,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _card_auto(self) -> dict:
         """Title and date filled in from the data and video."""
-        out = {"title": "", "date": ""}
-        if self.telem is not None and self.ctx is not None:
-            tm = self.telem
-            lm = self.ctx.laps
-            t = lm.laps[1].start if lm is not None and lm.ok and len(lm.laps) > 1 else None
-            if t is not None and tm.has("gps_lat") and tm.has("gps_lon"):
-                try:
-                    from racecore import tracks
-                    p = tracks.find(tm.sample(t, "gps_lat"), tm.sample(t, "gps_lon"))
-                    out["title"] = p.name if p else ""
-                except Exception:  # noqa: BLE001 - just no title
-                    pass
-            if not out["title"] and self.csv_path:
-                from racecore import tracks
-                n = tracks.name_from_file(self.csv_path)
-                out["title"] = "" if n == "Track" else n
-        if self.parts:
-            from racecore import ingest
-            rec, _fix = ingest.recorded_for(self.parts)
-            if rec is None:
-                rec = ingest._probe(self.parts[0])[0]
-            if rec is not None and rec.year >= 2020:
-                out["date"] = cardmod.fmt_date(rec)
-        return out
+        f = self._facts()
+        return {"title": f["track"],
+                "date": cardmod.fmt_date(f["date"]) if f["date"] else ""}
 
     def _cards_spec(self) -> cardmod.Cards:
         auto = self._card_auto() if (self.card_intro.isChecked()) else {}
@@ -3136,7 +3317,8 @@ class MainWindow(QtWidgets.QMainWindow):
             invert_lat=self.invert_lat, invert_lon=self.invert_lon,
             g_rotate=a.get("angle"), g_flip=bool(a.get("flip", False)),
             gauge_opts=self.gauge_opts, overrides=self.overrides or None,
-            cards=None if preview else self._cards_spec().to_dict())
+            cards=None if preview else self._cards_spec().to_dict(),
+            faststart=self.faststart_box.isChecked())
 
     def _render_preview(self):
         if not self._ready():
@@ -3195,6 +3377,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._proc_buf = ""
         self._proc_err = ""
         self._paused = False
+        self._stage = ""
+        self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.stats_lbl.setText("starting…")
         self.export_status.setText(("Preview: " if preview else "Rendering ")
@@ -3209,12 +3393,15 @@ class MainWindow(QtWidgets.QMainWindow):
         *lines, self._proc_buf = self._proc_buf.split("\n")
         for line in lines:
             if line.startswith("PROGRESS"):
+                if self._stage:          # past the drawing: the stage says what's on
+                    continue
                 try:
                     _, n, total, rate, rt, eta = line.split()
                     n, total = int(n), max(1, int(total))
                     rate, rt, eta = float(rate), float(rt), float(eta)
                 except ValueError:
                     continue
+                self.progress.setRange(0, 1000)
                 self.progress.setValue(int(1000 * n / total))
                 if not self._paused:
                     self.stats_lbl.setText(
@@ -3226,27 +3413,49 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.export_status.setText(
                         self.export_status.text()
                         + f"\nResuming: {m.group(1)} chunks already done.")
-            elif line.startswith("STAGE joining"):
-                self.progress.setValue(0)
-                self.stats_lbl.setText("Joining chunks + adding audio…")
-            elif line.startswith("JOIN"):
+            elif line.startswith("STAGE"):
+                # a named step after the drawing: busy bar until it reports a fraction
+                _, _, rest = line.partition(" ")
+                _key, _, text = rest.partition("\t")
+                self._stage = text or _key
+                self._stage_t0 = time.monotonic()
+                self._stage_detail = ""
+                self.progress.setRange(0, 0)
+                self._show_stage()
+            elif line.startswith("STEP"):
+                parts = line[5:].split("\t")
                 try:
-                    _, frac, i, n = line.split()
-                    frac = float(frac)
-                except ValueError:
+                    frac = float(parts[0])
+                except (ValueError, IndexError):
                     continue
+                files = parts[1] if len(parts) > 1 else ""
+                detail = parts[2] if len(parts) > 2 else ""
+                self.progress.setRange(0, 1000)
                 self.progress.setValue(int(1000 * frac))
-                files = f"  (file {i} of {n})" if int(n) > 1 else ""
-                self.stats_lbl.setText(
-                    f"Joining chunks + adding audio…  {100 * frac:3.0f}%{files}")
+                self._stage_detail = "  ·  ".join(x for x in (f"{100 * frac:3.0f}%", detail,
+                                                              files) if x)
+                self._show_stage()
             elif line.startswith("ERROR"):
                 self._proc_err = line[6:]
             elif line.strip():
                 self._proc_err = (self._proc_err + "\n" + line)[-1500:]
 
+    def _show_stage(self):
+        """The current step after the drawing, with how long it's been going."""
+        if not self._stage or self.proc is None:
+            return
+        el = int(time.monotonic() - self._stage_t0)
+        txt = f"{self._stage}…  {el // 60}:{el % 60:02d}"
+        if self._stage_detail:
+            txt += f"\n{self._stage_detail}"
+        if not self._paused:
+            self.stats_lbl.setText(txt)
+
     def _render_done(self, code: int):
         self.proc = None
         self._paused = False
+        self._stage = ""
+        self.progress.setRange(0, 1000)
         outs, preview = self._job_outputs, self._job_preview
         if code == 0:
             self.progress.setValue(1000)
