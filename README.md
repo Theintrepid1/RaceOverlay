@@ -230,6 +230,11 @@ PYTHONPATH=src .venv/bin/python -m raceoverlay.cli \
 ```
 
 ## Status
+v1.3.0 — export improvements:
+- **Trim ends:** cut the start and end of a whole-video export.
+- **Readable file names:** date, track, session, lap and lap time.
+- **A faster, clearer finish:** work files stay on this computer and only the finished video goes to the destination (a big win for NAS saves); every finishing step is named.
+
 v1.2.0 — Race Analysis and Race Overlay polish:
 - **Race Analysis:** pick your own charts, track-defined sectors, labels on the charts, and a better Day tab.
 - **Import:** fixes a GoPro clock that reset to 2016.
