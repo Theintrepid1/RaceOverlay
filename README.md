@@ -1,4 +1,4 @@
-# raceoverlay
+# Race Overlay and Race Analysis
 
 Burn racing telemetry gauges (speed, throttle/brake, g-force, track map, lap)
 onto video, with a GUI for lining the data up by eye.
