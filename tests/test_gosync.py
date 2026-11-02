@@ -84,3 +84,20 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
             print("ok", name)
+
+
+def test_real_gopro_gps_clock():
+    """A real HERO6 GPS track (positions zeroed): the camera's clock had reset
+    to 2016, GPS had a weak 2D fix. The GPS clock still gives the real time."""
+    import datetime as dt
+    from racecore import gpmf, ingest
+    p = os.path.join(os.path.dirname(__file__), "data", "gopro_hero6_gps_reset_clock.gpmd")
+    vt, utc = gpmf.gps_time_dump(p)
+    assert vt == 0.0
+    assert utc == dt.datetime(2026, 11, 2, 15, 3, 57, 255000, tzinfo=dt.timezone.utc)
+    # the import's correction for this clip, camera clock 2016-01-01 00:01:58 (EST)
+    clip = ingest.Clip("0014", "GH", ["x"], 0, dt.datetime(2016, 1, 1, 0, 1, 58))
+    est = dt.timezone(dt.timedelta(hours=-5))
+    real = utc.astimezone(est).replace(tzinfo=None)
+    ingest.fix_clock([clip], (real - clip.recorded).total_seconds())
+    assert clip.recorded.strftime("%Y-%m-%d %H:%M") == "2026-11-02 10:03"

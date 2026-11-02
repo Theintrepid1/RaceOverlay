@@ -1,6 +1,9 @@
 # Roadmap
 
 ## Next — planned (see the project's change list, batch F)
+- GoPro GPS clock: verified on a real HERO6 clip (reset clock, weak 2D fix).
+  Using GoPro GPS positions for laps or sync needs an outdoor clip with a
+  solid 3D lock first.
 - Day tab: compare many sessions (consecutive / baseline) across several days
 
 ## Next — collecting ideas, not started
@@ -9,14 +12,15 @@
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
-- **Next release (in PR, not released yet):**
-  - **Whole-video export trim:** From/To, with "Set to playhead".
+- **v1.3.0** (2026-11-02):
+  - **Whole-video export:** trim the ends (under "Trim ends").
   - **File names** like `2026-09-27 VIR S1 lap5 2'19.806.mp4`.
   - **Export finish:**
-    - Work files go to this computer's disk, and only the finished video is copied to the destination (one copy to a NAS, not three).
+    - Work files go to this computer's disk; only the finished video is copied to the destination (one copy to a NAS).
     - Audio is pulled out during the render.
-    - Every step after the drawing is named, with a running time.
+    - Every finishing step is named, with a running time.
     - Faststart is optional.
+  - **GoPro GPS clock:** checked against a real HERO6 clip.
 - **v1.2.0** (2026-10-31):
   - **Race Analysis:**
     - APEX exports recognized in all three naming styles, with short session names.
