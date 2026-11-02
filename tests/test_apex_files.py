@@ -75,3 +75,20 @@ def test_both_exports_load_the_same_and_ignore_empty_engine_columns():
         # APEX writes RPM and TPS columns of zeros without the OBD dongle
         assert not t.has("rpm") and not t.has("throttle")
         assert engine.channels(t) == []
+
+
+def test_name_without_csv_extension():
+    name = "APEX_Pro_Data__CSV__from_Carolina_Motorsports_Park_on_06.13.2026"
+    lg = ingest.log_info(name)
+    assert (lg.date, lg.session, lg.guessed) == (dt.date(2026, 6, 13), None, False)
+    assert ingest.is_apex_name(name) and not ingest.is_apex_name("notes_on_06.13.2026")
+    assert tracks.name_from_file(name) == "Carolina Motorsports Park"
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, name).write_text("Time\n0\n")
+        Path(tmp, "readme").write_text("x")
+        assert [Path(lg.path).name for lg in ingest.find_logs(tmp)] == [name]
+
+
+def test_builtin_cmp():
+    cmp = next(t for t in tracks.load_all(tracks.builtin_dir()) if t.key == "cmp_full")
+    assert cmp.name == "CMP Full Course" and len(cmp.sectors) == 2 and not cmp.turns

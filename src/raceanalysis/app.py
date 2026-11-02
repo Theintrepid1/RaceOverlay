@@ -800,7 +800,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
 
     def add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",
-                      "Telemetry (*.csv *.CSV *.txt);;All files (*)")
+                      "Telemetry (*.csv *.CSV *.txt APEX*);;All files (*)")
         if p:
             self.add_session(p)
 
