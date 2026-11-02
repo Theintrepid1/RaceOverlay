@@ -1329,8 +1329,25 @@ class MainWindow(QtWidgets.QMainWindow):
             rb.toggled.connect(lambda _: self._export_changed())
             wl.addWidget(rb)
             if rb is self.rb_whole:
-                # cut off the paddock drive / false grid at the start, etc.
+                # cut off the paddock drive / false grid at the start, etc.,
+                # tucked behind a button
+                self.trim_btn = QtWidgets.QToolButton()
+                self.trim_btn.setText("Trim ends")
+                self.trim_btn.setCheckable(True)
+                self.trim_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+                self.trim_btn.setArrowType(QtCore.Qt.RightArrow)
+                self.trim_btn.setAutoRaise(True)
+                self.trim_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+                self.trim_btn.setToolTip("Cut the start and end of the whole-video "
+                                         "export (paddock, false grid, cool-down)")
+                self.trim_btn.toggled.connect(self._trim_toggled)
+                trow = QtWidgets.QHBoxLayout()
+                trow.setContentsMargins(18, 0, 0, 0)
+                trow.addWidget(self.trim_btn)
+                trow.addStretch(1)
+                wl.addLayout(trow)
                 self.trim_w = QtWidgets.QWidget()
+                self.trim_w.setVisible(False)
                 tg = QtWidgets.QGridLayout(self.trim_w)
                 tg.setContentsMargins(22, 0, 0, 4)
                 self.trim_a, self.trim_b = TimeSpin(), TimeSpin()
@@ -3076,11 +3093,17 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setValue(v)
             w.blockSignals(False)
         cut = a + (dur - b)
+        self.trim_btn.setText(f"Trim ends  (on: keeps {fmt_t(b - a).split('.')[0]})"
+                              if cut > 0.05 else "Trim ends")
         self.trim_note.setText(f"Exports {fmt_t(b - a).split('.')[0]} of "
                                f"{fmt_t(dur).split('.')[0]}" + (
                                    f" (cutting {fmt_t(a).split('.')[0]} at the start, "
                                    f"{fmt_t(dur - b).split('.')[0]} at the end)"
                                    if cut > 0.05 else ""))
+
+    def _trim_toggled(self, on: bool):
+        self.trim_btn.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.trim_w.setVisible(on)
 
     def _trim_changed(self):
         if self.info is None:
@@ -3154,6 +3177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.lap_list, self.rb_split, self.rb_join, self.pad_spin):
             w.setEnabled(laps_mode)
         self.trim_w.setEnabled(not laps_mode and self.info is not None)
+        self.trim_btn.setEnabled(not laps_mode and self.info is not None)
         if laps_mode and self.sender() is self.pad_spin:
             self._fill_lap_list()
         self.out_lbl.setText(str(self._out_dir()))
