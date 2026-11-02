@@ -2,7 +2,10 @@
 # Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
 """Lap timing, distance-matched delta, and corner detection.
 
-Laps come from the logger's lap channel. The first lap (logger power-up to
+Laps come from the logger's lap channel. The logger flips the lap number
+on the first sample after the line, up to one sample (0.1 s at 10 Hz) late,
+so where there's GPS the crossing is placed between the two samples on
+either side of the line instead (see crossings()). The first lap (logger power-up to
 the first line crossing) is the out-lap and the last one is the in-lap (or a
 lap cut short when logging stopped); neither is timed. A flying lap more
 than 1.5x the median is treated as a slow/pit lap and isn't timed either.
@@ -65,9 +68,78 @@ class Lap:
         return self.kind == "flying"
 
 
+LINE_SIDE_M = 40.0      # a crossing this far along the line from its middle isn't it
+MAX_SHIFT_S = 0.6       # an interpolated crossing never moves a lap edge more than this
+
+
+def crossings(t: np.ndarray, lat, lon, edges) -> np.ndarray | None:
+    """Interpolated start/finish crossing time for each lap edge.
+
+    edges are the sample indices where the logger's lap number changed. The
+    line is found from the logger's own crossings: its middle is the median
+    of the midpoints between the sample before and the sample at each edge,
+    and it runs square to the average direction of travel there. Each edge
+    is then moved back to where the straight line between the GPS fixes on
+    either side meets it. Repeated (stale) fixes are skipped. An edge with
+    no crossing nearby keeps the logger's time. None without GPS."""
+    edges = [int(e) for e in edges]
+    if lat is None or lon is None or not edges:
+        return None
+    lat = np.asarray(lat, float)
+    lon = np.asarray(lon, float)
+    ok = np.isfinite(lat) & np.isfinite(lon) & (np.abs(lat) + np.abs(lon) > 0)
+    if ok.sum() < 10:
+        return None
+    lat0, lon0 = float(np.median(lat[ok])), float(np.median(lon[ok]))
+    p = np.full((len(t), 2), np.nan)
+    p[ok, 0] = (lon[ok] - lon0) * 111320.0 * np.cos(np.radians(lat0))
+    p[ok, 1] = (lat[ok] - lat0) * 110540.0
+    fresh = ok.copy()
+    fresh[1:] &= np.any(np.diff(p, axis=0) != 0, axis=1) | ~ok[:-1]
+    fi = np.flatnonzero(fresh)
+    mids, dirs = [], []
+    for e in edges:
+        a = fi[fi < e]
+        b = fi[fi >= e]
+        if len(a) < 2 or not len(b):
+            continue
+        i_a, i_b = a[-1], b[0]
+        d = p[i_b] - p[a[-2]]
+        n = float(np.hypot(*d))
+        if n < 1.0 or t[i_b] - t[i_a] > 1.0:
+            continue
+        mids.append((p[i_a] + p[i_b]) / 2)
+        dirs.append(d / n)
+    if not mids:
+        return None
+    c = np.median(np.array(mids), axis=0)
+    u = np.mean(np.array(dirs), axis=0)
+    if np.hypot(*u) < 0.5:          # crossings in opposite directions: no line
+        return None
+    u /= np.hypot(*u)
+    along = (p - c) @ u                      # metres past the line
+    side = (p - c) @ np.array([-u[1], u[0]])  # metres along it
+    out = np.array([float(t[e]) for e in edges])
+    for k, e in enumerate(edges):
+        near = fi[(t[fi] >= t[e] - MAX_SHIFT_S - 0.5) & (t[fi] <= t[e] + MAX_SHIFT_S)]
+        best = None
+        for j0, j1 in zip(near, near[1:]):
+            s0, s1 = along[j0], along[j1]
+            if not (s0 < 0 <= s1) or abs(side[j1]) > LINE_SIDE_M:
+                continue
+            tc = t[j0] + (-s0) / (s1 - s0) * (t[j1] - t[j0])
+            if abs(tc - t[e]) <= MAX_SHIFT_S and (best is None or
+                                                 abs(tc - t[e]) < abs(best - t[e])):
+                best = tc
+        if best is not None:
+            out[k] = best
+    return out
+
+
 class LapModel:
     def __init__(self, tel: Telemetry):
         self.laps: list[Lap] = []
+        self.interpolated = False
         self.time = tel.time
         lap = tel.channels.get("lap")
         spd = tel.channels.get("speed")
@@ -92,11 +164,16 @@ class LapModel:
                                  "flying", float(self.dist[-1] - self.dist[0])))
             self._finish(t)
             return
+        cross = crossings(t, tel.channels.get("gps_lat"), tel.channels.get("gps_lon"),
+                          starts[1:])
+        self.interpolated = cross is not None
+        edge = [float(t[0])] + ([float(x) for x in cross] if cross is not None
+                                else [float(t[i]) for i in starts[1:]])
         for k, (i0, i1) in enumerate(zip(starts, ends)):
-            end_t = t[i1] if i1 < len(t) else t[-1]
+            end_t = edge[k + 1] if i1 < len(t) else t[-1]
             end_d = self.dist[i1] if i1 < len(t) else self.dist[-1]
             kind = "out" if k == 0 else ("in" if k == len(starts) - 1 else "flying")
-            self.laps.append(Lap(int(lapn[i0]), int(i0), int(i1), float(t[i0]),
+            self.laps.append(Lap(int(lapn[i0]), int(i0), int(i1), edge[k],
                                  float(end_t), kind, float(end_d - self.dist[i0])))
         self._finish(t)
 

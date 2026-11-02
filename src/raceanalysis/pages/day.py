@@ -20,6 +20,24 @@ from .. import fields, gglabels, pointlabels
 from ..common import GAIN, INK_DIM, LIMIT, LOSS, NEUTRAL, SERIES, cap_columns, fmt_lap
 
 
+def _esc(x: str) -> str:
+    return x.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _one_line(x: str, n: int = 80) -> str:
+    x = "; ".join(p.strip() for p in x.splitlines() if p.strip())
+    return x if len(x) <= n else x[:n - 1] + "…"
+
+
+def _short_names(names: list[str]) -> list[str]:
+    """'Session 1 · Sep 27', 'Session 2 · Sep 27' -> 'Session 1', 'Session 2'
+    when every name ends the same way."""
+    tails = {n.rsplit(" · ", 1)[1] if " · " in n else None for n in names}
+    if len(tails) == 1 and None not in tails and len(names) > 1:
+        return [n.rsplit(" · ", 1)[0] for n in names]
+    return names
+
+
 def _scolor(i: int) -> str:
     return SERIES[i % len(SERIES)]
 
@@ -38,6 +56,7 @@ class DayPage(QtWidgets.QWidget):
         self.win = win
         self.notes: list[day.Notes] = []
         self.sel = 0
+        self.capacity = None
         self._loading = False
         self._busy: set = set()
         self._offline: set = set()      # sessions whose weather lookup failed
@@ -70,14 +89,21 @@ class DayPage(QtWidgets.QWidget):
         tl.setContentsMargins(0, 0, 0, 0)
         crow = QtWidgets.QHBoxLayout()
         crow.addWidget(QtWidgets.QLabel("Compare"))
-        self.cmp_b = QtWidgets.QComboBox()
-        crow.addWidget(self.cmp_b)
-        crow.addWidget(QtWidgets.QLabel("against"))
-        self.cmp_a = QtWidgets.QComboBox()
-        crow.addWidget(self.cmp_a)
+        self.mode_step = QtWidgets.QRadioButton("Step by step")
+        self.mode_step.setToolTip("Each session against the one before it: what changed "
+                                  "from one session to the next")
+        self.mode_base = QtWidgets.QRadioButton("Against")
+        self.mode_base.setToolTip("Every session against one baseline session")
+        self.cmp_base = QtWidgets.QComboBox()
+        self.cmp_base.setToolTip("The baseline session")
+        self.cmp_base.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        mode = settings().value("analysis/day_compare", "consecutive")
+        (self.mode_base if mode == "baseline" else self.mode_step).setChecked(True)
+        for wdg in (self.mode_step, self.mode_base, self.cmp_base):
+            crow.addWidget(wdg)
         crow.addStretch(1)
-        for cb in (self.cmp_a, self.cmp_b):
-            cb.activated.connect(lambda _i: self._fill_turns())
+        self.mode_step.toggled.connect(self._mode_changed)
+        self.cmp_base.activated.connect(lambda _i: self._fill_turns())
         tl.addLayout(crow)
         self.verdict = _note("")
         self.verdict.setWordWrap(True)
@@ -202,6 +228,7 @@ class DayPage(QtWidgets.QWidget):
         self.notes = [day.Notes.load(s.path) for s in a.sessions]
         self.sel = min(self.sel, max(0, len(a.sessions) - 1))
         if a.ref is None:
+            self.capacity = None
             self.sessions.setRowCount(0)
             self.turns.setRowCount(0)
             self.env.clear()
@@ -304,57 +331,97 @@ class DayPage(QtWidgets.QWidget):
     def _fill_pickers(self):
         a = self.win.a
         n = len(a.sessions)
-        for cb, default in ((self.cmp_b, n - 1), (self.cmp_a, 0)):
-            cur = cb.currentIndex()
-            cb.blockSignals(True)
-            cb.clear()
-            for s in a.sessions:
-                cb.addItem(s.name)
-            cb.setCurrentIndex(cur if 0 <= cur < n else default)
-            cb.blockSignals(False)
-        for cb in (self.cmp_a, self.cmp_b):
-            cb.setEnabled(n > 1)
+        cur = self.cmp_base.currentIndex()
+        self.cmp_base.blockSignals(True)
+        self.cmp_base.clear()
+        for s in a.sessions:
+            self.cmp_base.addItem(s.name)
+        self.cmp_base.setCurrentIndex(cur if 0 <= cur < n else 0)
+        self.cmp_base.blockSignals(False)
+        for wdg in (self.mode_step, self.mode_base):
+            wdg.setEnabled(n > 2)        # with two sessions both modes are the same
+        self.cmp_base.setEnabled(n > 2 and self.mode_base.isChecked())
+
+    def _mode(self) -> tuple[str, int]:
+        if self.mode_base.isChecked() and len(self.win.a.sessions) > 2:
+            return "baseline", max(0, self.cmp_base.currentIndex())
+        return "consecutive", 0
+
+    def _mode_changed(self, *_):
+        settings().setValue("analysis/day_compare",
+                            "baseline" if self.mode_base.isChecked() else "consecutive")
+        self.cmp_base.setEnabled(len(self.win.a.sessions) > 2 and self.mode_base.isChecked())
+        self._fill_turns()
 
     def _fill_turns(self):
         a = self.win.a
         corners, rows = self.capacity
         n = len(a.sessions)
+        mode, base = self._mode()
         t = self.turns
-        cols = ["Turn"] + [s.name for s in a.sessions] + (["Change"] if n > 1 else [])
+        cols = ["Turn"] + [s.name for s in a.sessions]
         t.setColumnCount(len(cols))
         t.setHorizontalHeaderLabels(cols)
+        against = ("the session before it" if mode == "consecutive"
+                   else f"{a.sessions[base].name} (baseline)" if n else "")
         for i in range(n):
             hi = t.horizontalHeaderItem(i + 1)
             hi.setForeground(QtGui.QColor(_scolor(i)))
             hi.setToolTip("95th percentile of combined g through the turn, all timed laps "
-                          "of the session")
-        sa, sb = self.cmp_a.currentIndex(), self.cmp_b.currentIndex()
+                          f"of the session. The small number is the change against {against}.")
         t.setRowCount(len(corners))
         for r, (c, row) in enumerate(zip(corners, rows)):
-            cells = [c.name] + [f"{v:.2f}" if v is not None else "" for v in row]
-            diff = None
-            if n > 1 and sa != sb and row[sa] is not None and row[sb] is not None:
-                diff = row[sb] - row[sa]
-                cells.append(f"{diff:+.2f}")
-            for col, txt in enumerate(cells):
+            t.setItem(r, 0, QtWidgets.QTableWidgetItem(c.name))
+            for si, v in enumerate(row):
+                ch = day.cell_change(rows, r, si, mode, base) if v is not None else None
+                txt = "" if v is None else f"{v:.2f}"
+                if ch is not None:
+                    txt += f"  {ch:+.2f}".replace("0.", ".")
                 it = QtWidgets.QTableWidgetItem(txt)
-                if col:
-                    it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                if col == len(cells) - 1 and diff is not None:
-                    it.setForeground(QtGui.QColor(GAIN if diff > 0.02 else
-                                                  LOSS if diff < -0.02 else NEUTRAL))
-                t.setItem(r, col, it)
+                it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                if ch is not None:
+                    it.setForeground(QtGui.QColor(GAIN if ch > 0.02 else
+                                                  LOSS if ch < -0.02 else NEUTRAL))
+                    other = base if mode == "baseline" else si - 1
+                    it.setToolTip(f"{c.name}: {v:.2f} g, {ch:+.2f} against "
+                                  f"{a.sessions[other].name}")
+                elif mode == "baseline" and si == base and v is not None:
+                    it.setToolTip("Baseline")
+                t.setItem(r, si + 1, it)
         t.resizeColumnsToContents()
         if n < 2:
             self.verdict.setText("One session so far. Add the day's other sessions to see "
                                  "how the grip you used changed (File → Add data file…).")
-        elif sa == sb:
-            self.verdict.setText("Pick two different sessions.")
-        else:
-            v = day.compare_sessions([c.name for c in corners], rows, sa, sb)
-            nb, na = a.sessions[sb].name, a.sessions[sa].name
-            self.verdict.setText(f"<b>{nb} vs {na}:</b> " + (v.text if v else
-                                                            "not enough turns to compare."))
+            self.verdict.setToolTip("")
+            return
+        timed = [[ld.time for ld in a.laps if ld.session == si and ld.timed]
+                 for si in range(n)]
+        bests = [min(x) if x else None for x in timed]
+        story = day.story([c.name for c in corners], rows, bests,
+                          [nt.changes for nt in self.notes] + [""] * (n - len(self.notes)),
+                          mode, base)
+        self.verdict.setText(self.story_html(story, mode))
+        self.verdict.setToolTip("<br><br>".join(
+            f"<b>{a.sessions[st.to].name} vs {a.sessions[st.frm].name}:</b> {st.verdict.text}"
+            for st in story if st.verdict))
+
+    def story_html(self, story, mode: str) -> str:
+        a = self.win.a
+        names = _short_names([s.name for s in a.sessions])
+        lines = []
+        for st in story:
+            na, nb = names[st.frm], names[st.to]
+            head = (f"{na} → {nb}" if mode == "consecutive" else f"{nb} vs {na}")
+            bits = [f"<span style='color:{_scolor(st.to)}'>■</span> <b>{_esc(head)}</b>"]
+            if st.best_change is not None:
+                col = GAIN if st.best_change < -0.05 else LOSS if st.best_change > 0.05 \
+                    else NEUTRAL
+                bits.append(f"best <span style='color:{col}'>{st.best_change:+.2f} s</span>")
+            bits.append(_esc(st.verdict.short) if st.verdict else "too few turns to compare")
+            if st.changes and mode == "consecutive":
+                bits.append(f"<i>you changed: {_esc(_one_line(st.changes))}</i>")
+            lines.append(" · ".join(bits))
+        return "<br>".join(lines)
 
     # --------------------------------------------------------------- plots
     def _draw_env(self):
@@ -604,6 +671,7 @@ class DayPage(QtWidgets.QWidget):
         n.track_temp = self.f_track.text().strip()
         n.tires = self.f_tires.text().strip()
         n.fuel = self.f_fuel.text().strip()
+        changed = n.changes != self.f_changes.toPlainText().strip()
         n.changes = self.f_changes.toPlainText().strip()
         n.text = self.f_text.toPlainText().strip()
         try:
@@ -615,6 +683,8 @@ class DayPage(QtWidgets.QWidget):
                                self.start_src.text())
         self.win.rename_session(self.sel)
         self._fill_sessions_text(self.sel)
+        if changed and getattr(self, "capacity", None) is not None:
+            self._fill_turns()            # the story quotes the Changes note
         if not n.weather and n.start_dt():
             self._fetch_weather(self.sel, quiet=True)
         self._show_weather()
