@@ -38,9 +38,11 @@ GOPRO_DIR_RE = re.compile(r"^\d{3}GOPRO$", re.IGNORECASE)
 #   "APEX Pro Data (CSV) from Virginia Int'l Raceway (Full) on 09.27 (1).2026.csv"
 #   "APEX_Pro_Data_CSV_from_Virginia_Intl_Raceway_Full_on_09.27_1.2026.csv"
 #   "Virginia_Intl_Raceway_Full__812128378.csv"   (session ID, no date)
+#   "APEX_Pro_Data__CSV__from_Carolina_Motorsports_Park_on_06.13.2026"
+#                                                 (no ".csv" at all)
 # The CSVs themselves carry no date or clock time, only seconds from start.
 APEX_DATE_RE = re.compile(
-    r"(?:^|[\s_])on[\s_]+(\d{1,2})\.(\d{1,2})(?:[\s_]*\(?(\d+)\)?)?\.(\d{4})\.csv$",
+    r"(?:^|[\s_])on[\s_]+(\d{1,2})\.(\d{1,2})(?:[\s_]*\(?(\d+)\)?)?\.(\d{4})(?:\.csv)?$",
     re.IGNORECASE)
 APEX_ID_RE = re.compile(r"^(.+?)__(\d{5,})\.csv$", re.IGNORECASE)
 COPY_CHUNK = 8 << 20
@@ -348,6 +350,11 @@ def log_info(path: str) -> Log:
     return Log(path, mtime, guessed=True)
 
 
+def is_apex_name(name: str) -> bool:
+    """An APEX Pro export, by its name (with or without ".csv")."""
+    return bool(APEX_DATE_RE.search(name)) and "apex" in name.lower()
+
+
 def log_id(path: str) -> str | None:
     """APEX session ID from an ID-style export name, else None."""
     m = APEX_ID_RE.match(Path(path).name)
@@ -355,10 +362,11 @@ def log_id(path: str) -> str | None:
 
 
 def find_logs(folder: str) -> list[Log]:
-    """Logger CSVs in a folder (not recursive), newest first."""
+    """Logger CSVs in a folder (not recursive), newest first. APEX Pro
+    exports sometimes come without ".csv"; those are found by their name."""
     try:
         files = [str(p) for p in Path(folder).iterdir()
-                 if p.is_file() and p.suffix.lower() == ".csv"]
+                 if p.is_file() and (p.suffix.lower() == ".csv" or is_apex_name(p.name))]
     except OSError:
         return []
     logs = [log_info(f) for f in files]

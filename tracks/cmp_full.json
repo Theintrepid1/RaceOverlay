@@ -1,0 +1,20 @@
+{
+  "name": "CMP Full Course",
+  "start": [
+    34.486693,
+    -80.595767
+  ],
+  "turns": [],
+  "sectors": [
+    {
+      "lat": 34.4866671,
+      "lon": -80.5894346
+    },
+    {
+      "lat": 34.4868184,
+      "lon": -80.5973643
+    }
+  ],
+  "image": null,
+  "transform": null
+}
