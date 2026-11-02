@@ -74,6 +74,32 @@ def test_compare_sessions():
     assert day.compare_sessions(names[:2], rows[:2], 0, 1) is None
 
 
+def test_story_consecutive_and_baseline():
+    names = ["T1", "T2", "T3", "T4", "T5", "T6"]
+    s1 = [1.00, 1.05, 0.95, 1.10, 1.00, 0.98]
+    s2 = [x + 0.05 for x in s1]                                     # pressures
+    s3 = [x + (0.12 if n == "T3" else 0.0) for x, n in zip(s2, names)]  # driving
+    s4 = [x - 0.002 for x in s3]
+    rows = [list(r) for r in zip(s1, s2, s3, s4)]
+    bests = [142.0, 141.2, 140.9, None]
+    notes = ["", "dropped 2 psi\n", "later brake into 3", ""]
+    st = day.story(names, rows, bests, notes)
+    assert [(x.frm, x.to) for x in st] == [(0, 1), (1, 2), (2, 3)]
+    assert st[0].verdict.kind == "all" and st[0].changes == "dropped 2 psi"
+    assert abs(st[0].best_change + 0.8) < 1e-9
+    assert st[1].verdict.kind == "some" and st[1].verdict.short.startswith("T3 +0.12,")
+    assert st[2].verdict.kind == "flat" and st[2].best_change is None
+    bl = day.story(names, rows, bests, notes, mode="baseline", base=0)
+    assert [(x.frm, x.to) for x in bl] == [(0, 1), (0, 2), (0, 3)]
+    assert bl[1].verdict.kind == "all"          # +0.05 everywhere vs session 1
+    assert day.steps(1) == [] and day.steps(3, "baseline", 1) == [(1, 0), (1, 2)]
+    # cell colours: against the session before, or the baseline
+    assert day.cell_change(rows, 2, 0) is None
+    assert abs(day.cell_change(rows, 2, 2) - 0.12) < 1e-9
+    assert abs(day.cell_change(rows, 2, 2, "baseline", 0) - 0.17) < 1e-9
+    assert day.cell_change(rows, 2, 0, "baseline", 0) is None
+
+
 def test_grip_by_session():
     a = analysis.Analysis()
     a.add(_session([(None, 0), (None, 0)], noise=0.3), "s1.csv", name="s1")

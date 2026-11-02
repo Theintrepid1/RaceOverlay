@@ -260,6 +260,8 @@ class Verdict:
     agree: float             # share of turns that moved the same way as the median
     outliers: list[str]      # turns that moved a lot against the trend
     text: str
+    short: str = ""          # one line for the step-by-step story
+    kind: str = ""           # "all" | "some" | "uneven" | "flat"
 
 
 def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, s1: int,
@@ -280,16 +282,78 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
     outliers = [n for n, r in zip(which, resid) if abs(r) >= big]
     word = "more" if shift > 0 else "less"
     if abs(shift) >= min_shift and same >= 0.75:
+        kind = "all"
         text = (f"Nearly every turn used {abs(shift):.2f} g {word} grip ({same:.0%} of turns "
                 "moved the same way). Changes everywhere at once usually come from the "
                 "car, tires, track or temperature rather than driving.")
+        short = f"every turn {shift:+.2f} g: car, tires, track or temperature"
     elif outliers:
+        kind = "some"
         text = (f"Most turns stayed about the same ({shift:+.2f} g), but "
                 f"{', '.join(outliers)} changed a lot. Changes in a few turns usually come "
                 "from driving (line, braking, commitment) there.")
+        moved = sorted(((n, r) for n, r in zip(which, d) if n in outliers),
+                       key=lambda x: -abs(x[1]))
+        txt = ", ".join(f"{n} {r:+.2f}" for n, r in moved[:3])
+        if len(moved) > 3:
+            txt += f" and {len(moved) - 3} more"
+        short = f"{txt}, the rest about the same: driving"
     elif abs(shift) >= min_shift:
+        kind = "uneven"
         text = (f"Grip used changed {shift:+.2f} g overall, but unevenly ({same:.0%} of turns "
                 "the same way): no clear sign of car or driver.")
+        short = f"{shift:+.2f} g overall but uneven: no clear cause"
     else:
+        kind = "flat"
         text = f"Little change ({shift:+.2f} g across turns)."
-    return Verdict(shift, same, outliers, text)
+        short = f"little change ({shift:+.2f} g)"
+    return Verdict(shift, same, outliers, text, short, kind)
+
+
+@dataclass
+class Step:
+    """One link in the comparison story: session `to` against `frm`."""
+    frm: int
+    to: int
+    verdict: Verdict | None
+    best_change: float | None      # seconds, - = faster
+    changes: str                   # what the driver noted before session `to`
+
+
+def steps(n: int, mode: str = "consecutive", base: int = 0) -> list[tuple[int, int]]:
+    """Which pairs to compare: each session against the one before it
+    ("consecutive") or every other session against one ("baseline")."""
+    if n < 2:
+        return []
+    if mode == "baseline":
+        base = min(max(0, base), n - 1)
+        return [(base, i) for i in range(n) if i != base]
+    return [(i - 1, i) for i in range(1, n)]
+
+
+def story(names: list[str], rows: list[list[float | None]], bests: list[float | None],
+          changes: list[str], mode: str = "consecutive", base: int = 0) -> list[Step]:
+    """The day as a chain of comparisons. names are the turns, rows[turn] the
+    grip used per session, bests each session's best lap, changes each
+    session's "Changes" note."""
+    out = []
+    for a, b in steps(len(bests), mode, base):
+        v = compare_sessions(names, rows, a, b)
+        bc = bests[b] - bests[a] if bests[a] is not None and bests[b] is not None else None
+        out.append(Step(a, b, v, bc, (changes[b] or "").strip()))
+    return out
+
+
+def cell_change(rows: list[list[float | None]], r: int, si: int, mode: str = "consecutive",
+                base: int = 0) -> float | None:
+    """Change in turn r's grip used for session si against what it's being
+    compared with (the session before, or the baseline). None for the
+    first/baseline session or a missing value."""
+    if mode == "baseline":
+        other = base
+    else:
+        other = si - 1
+    if other < 0 or other == si:
+        return None
+    a, b = rows[r][other], rows[r][si]
+    return None if a is None or b is None else b - a
