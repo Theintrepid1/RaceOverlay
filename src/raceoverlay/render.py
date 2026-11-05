@@ -147,6 +147,10 @@ class OverlayContext:
             return gauges.load_logo(g.get("image", "")) is not None
         if g["type"] == "text":
             return bool(g.get("text"))
+        if g["type"] == "delta":
+            return self.laps is not None and self.laps.ok
+        if g["type"] == "dash":
+            return True               # shows whatever the file has
         return self.telem.has(g["src"])
 
     def shown(self) -> list[str]:
@@ -250,6 +254,89 @@ class OverlayContext:
             v["bar_frac"] = raw / self.vmax if np.isfinite(raw) else 0.0
         return v
 
+    # ----- dash -----
+
+    def gear_series(self, rpm_src: str = "rpm") -> np.ndarray | None:
+        """Gear per sample from RPM against speed (0 = shifting / clutch in),
+        or None without RPM or a clear set of gears."""
+        key = ("gear", rpm_src)
+        if key in self._range_cache:
+            return self._range_cache[key]
+        out = None
+        rpm, spd = self.telem.series(rpm_src), self.telem.series("speed")
+        if rpm is not None and spd is not None and self.telem.has(rpm_src):
+            from racecore import engine
+            rpm = engine.smooth_holds(self.telem.time, rpm)     # OBD steps -> line
+            gearing = engine.find_gearing(rpm, spd)
+            if gearing:
+                out = engine.clean_runs(gearing.gear(rpm, spd), self.telem.time)
+        self._range_cache[key] = out
+        return out
+
+    def dash_rpm_limits(self, g: dict) -> tuple[float | None, float | None, float | None]:
+        """(rpm_max, shift_lo, shift_hi): the gauge's own numbers, or from the
+        file (top of the RPM seen, rounded up to 1000; lights from 80%, all
+        lit at 95% of the highest RPM reached)."""
+        src = g.get("rpm_src") or "rpm"
+        top = None
+        if self.telem.has(src):
+            vals = self.telem.series(src)
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                top = float(np.percentile(vals, 99.8))
+        rmax = g.get("rpm_max") or (float(np.ceil(top / 1000.0) * 1000.0) if top else None)
+        lo = g.get("shift_lo") or (round(top * 0.80, -2) if top else None)
+        hi = g.get("shift_hi") or (round(top * 0.95, -2) if top else None)
+        return rmax, lo, hi
+
+    def slot_text(self, sl: dict, t: float) -> tuple[str, str, str, bool]:
+        src = sl.get("src") or ""
+        if not src:
+            return ("", "", "", False)
+        g = dict(gauges.GAUGE_DEFAULTS, id="slot:" + src, type="number", src=src,
+                 conv=sl.get("conv", ""), decimals=sl.get("decimals", -1))
+        label = sl.get("label") or gauges.box_label({"custom": [g]}, g["id"]).upper()
+        if not self.telem.has(src):
+            return (label, "", "", False)
+        val = self.gauge_values(g, t)
+        return (label, gauges.fmt_value(val["value"], val["decimals"]), val["unit"], True)
+
+    def dash_values(self, g: dict, t: float) -> dict:
+        src = g.get("rpm_src") or "rpm"
+        rmax, lo, hi = self.dash_rpm_limits(g)
+        rpm = None
+        if self.telem.has(src):
+            r = self.telem.sample(t, src)
+            rpm = float(r) if np.isfinite(r) else None
+        gear = None
+        gs = self.gear_series(src)
+        if gs is not None and len(gs) == len(self.telem.time):
+            i = int(np.clip(np.searchsorted(self.telem.time, t), 0, len(gs) - 1))
+            gear = int(gs[i])
+        spd = None
+        if self.telem.has("speed"):
+            sv = self.telem.sample(t, "speed")
+            spd = float(sv / 1.60934 if self.use_mph else sv) if np.isfinite(sv) else None
+
+        def pedal(role):
+            if not self.telem.has(role):
+                return None
+            pv = self.telem.sample(t, role)
+            return float(pv) if np.isfinite(pv) else 0.0
+
+        lap = None
+        if self.laps is not None and self.laps.ok:
+            lp = self.laps.lap_at(t)
+            lap = lp.n if lp is not None and lp.kind != "out" else None
+        return {"rpm": rpm, "rpm_max": rmax, "shift_lo": lo, "shift_hi": hi,
+                "flash": int(t * 8) % 2 == 0, "gear": gear,
+                "center": "gear" if rpm is not None else "speed",
+                "speed": spd, "speed_unit": "MPH" if self.use_mph else "KM/H",
+                # the big centre number is speed without RPM: no speed slot too
+                "slots": [self.slot_text(sl, t) for sl in g.get("slots") or []
+                          if not (rpm is None and sl.get("src") == "speed")],
+                "throttle": pedal("throttle"), "brake": pedal("brake"), "lap": lap}
+
     def track_img(self, box):
         x, y, w, h, k = box
         key = (int(w), int(h), self.style.name)
@@ -321,6 +408,26 @@ def laptimer_state(ctx: OverlayContext, t: float) -> dict | None:
     return s
 
 
+TREND_S = 1.0      # delta bar "trend": change in delta over this long
+
+
+def delta_state(ctx: OverlayContext, t: float) -> dict:
+    """What the delta bar shows: the lap timer's delta and reference lap,
+    plus how fast the delta is changing (for trend colouring)."""
+    s = laptimer_state(ctx, t) if ctx.laps is not None and ctx.laps.ok else None
+    if not s or s.get("delta") is None:
+        return {"delta": None, "rate": None, "ref": None}
+    d = s["delta"]
+    rate = None
+    lap = ctx.laps.lap_at(t)
+    if lap is not None and lap.timed and t - TREND_S >= lap.start:
+        p = laptimer_state(ctx, t - TREND_S)
+        if p and p.get("delta") is not None and p.get("delta_label") == s.get("delta_label"):
+            rate = (d - p["delta"]) / TREND_S
+    ref = s.get("delta_label", "").replace("vs LAP ", "") or None
+    return {"delta": d, "rate": rate, "ref": ref}
+
+
 def corner_state(ctx: OverlayContext, t: float) -> dict:
     cm = ctx.corners
     s = {"entry": None, "vmin": None, "g": None, "use_mph": ctx.use_mph,
@@ -345,19 +452,27 @@ def corner_state(ctx: OverlayContext, t: float) -> dict:
 
 
 def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
-                 edit: bool = False, active: str | None = None):
+                 edit: bool = False, active: str | None = None, guides=()):
     """Draw every enabled gauge for telemetry time `t` onto frame `f`."""
     st = ctx.style
     boxes = gauges.layout_boxes(ctx.layout, f.w, f.h)
     shown = ctx.shown()
     customs = {g["id"]: g for g in ctx.layout.get("custom", [])}
+    delta_bar_shown = any(n in customs and customs[n]["type"] == "delta" for n in shown)
     for name in shown:
         box = boxes[name]
         if name == "map":
             gauges.draw_map(f, box, st, ctx.track_img(box), ctx.cur_map(t))
         elif name in customs:
             g = customs[name]
-            v = ctx.gauge_values(g, t) if g["type"] in gauges.DATA_TYPES else None
+            if g["type"] in gauges.DATA_TYPES:
+                v = ctx.gauge_values(g, t)
+            elif g["type"] == "delta":
+                v = delta_state(ctx, t)
+            elif g["type"] == "dash":
+                v = ctx.dash_values(g, t)
+            else:
+                v = None
             gauges.CUSTOM_DRAW[g["type"]](f, box, st, g, v)
         elif name == "gball":
             lat, lon = ctx.g_at(t)
@@ -368,11 +483,15 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
             gauges.draw_gball(f, box, st, lat, lon, trail)
         elif name == "laptimer":
             s = laptimer_state(ctx, t)
+            if s is not None and delta_bar_shown:
+                # the delta bar shows the gap; don't repeat it here
+                s = dict(s, delta=None, delta_label="", bar=False)
             if s is not None:
                 gauges.draw_laptimer(f, box, st, s)
         elif name == "corner":
             gauges.draw_corner(f, box, st, corner_state(ctx, t))
     if edit:
+        gauges.draw_guides(f, guides)
         gauges.draw_edit_boxes(f, boxes, shown, active, ctx.labels())
 
 

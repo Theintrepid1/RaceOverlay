@@ -144,10 +144,27 @@ PURPLE = (190, 120, 255, 255)
 #   align (left|center, numbers), show_value, x, y, scale, on
 
 GAUGE_TYPES = {"number": "Number", "bar": "Bar", "dial": "Dial",
-               "image": "Logo", "text": "Text"}
+               "image": "Logo", "text": "Text", "delta": "Delta bar",
+               "dash": "Dash"}
 DATA_TYPES = {"number", "bar", "dial"}      # the ones that show a channel
+LIVE_TYPES = {"delta", "dash"}              # fed by lap timing / several channels
 BASE_SIZE = {("number", ""): (220, 100), ("bar", "h"): (300, 64),
-             ("bar", "v"): (64, 240), ("dial", ""): (220, 220)}
+             ("bar", "v"): (64, 240), ("dial", ""): (220, 220),
+             ("delta", ""): (600, 84), ("dash", ""): (660, 330)}
+
+#   Delta bar: range (seconds at full bar), green ("left": ahead fills left,
+#   like a number line; "right"), trend (colour by gaining/losing right now
+#   instead of ahead/behind).
+#   Dash: slots (4 x {src, label, conv, decimals}), rpm_src, rpm_max,
+#   shift_lo / shift_hi (RPM where the lights start / all light and flash;
+#   None = from the data), pedals (brake/throttle bars), text (footer).
+DASH_SLOTS = 4
+
+
+def default_slots() -> list[dict]:
+    return [{"src": s, "label": l, "conv": "", "decimals": -1}
+            for s, l in (("speed", "SPEED"), ("lat_g", "LAT G"),
+                         ("lon_g", "LONG G"), ("", ""))]
 LOGO_WIDTH = 240          # a logo's width at 1080p, scale 1
 TEXT_PX = 44              # a text gauge's font size at 1080p, scale 1
 
@@ -158,7 +175,10 @@ GAUGE_DEFAULTS = {"type": "number", "src": "speed", "label": "",
                   "max": None, "redline": None, "orient": "h",
                   "color": "accent", "align": "left", "show_value": True,
                   "x": 0.4, "y": 0.4, "scale": 1.0, "on": True,
-                  "image": "", "aspect": 1.0, "opacity": 100, "text": ""}
+                  "image": "", "aspect": 1.0, "opacity": 100, "text": "",
+                  "range": 1.0, "green": "left", "trend": False,
+                  "slots": None, "rpm_src": "rpm", "rpm_max": None,
+                  "shift_lo": None, "shift_hi": None, "pedals": True}
 
 
 def logos_dir():
@@ -252,6 +272,36 @@ def normalize_gauge(g: dict) -> dict:
         out[f] = float(out[f])
     out["opacity"] = int(max(0, min(100, out["opacity"])))
     out["on"] = bool(out["on"])
+    try:
+        out["range"] = float(max(0.1, min(10.0, float(out["range"]))))
+    except (TypeError, ValueError):
+        out["range"] = 1.0
+    if out["green"] not in ("left", "right"):
+        out["green"] = "left"
+    if out["type"] == "dash":
+        out["slots"] = _norm_slots(out.get("slots"))
+    for f in ("rpm_max", "shift_lo", "shift_hi"):
+        try:
+            out[f] = None if out[f] in (None, "") else float(out[f])
+        except (TypeError, ValueError):
+            out[f] = None
+    return out
+
+
+def _norm_slots(slots) -> list[dict]:
+    out = []
+    for sl in (slots if isinstance(slots, list) else default_slots()):
+        if isinstance(sl, str):
+            sl = {"src": sl}
+        if not isinstance(sl, dict):
+            sl = {}
+        out.append({"src": str(sl.get("src") or ""), "label": str(sl.get("label") or ""),
+                    "conv": str(sl.get("conv") or ""),
+                    "decimals": int(sl.get("decimals", -1) if sl.get("decimals")
+                                    is not None else -1)})
+    out = out[:DASH_SLOTS]
+    while len(out) < DASH_SLOTS:
+        out.append({"src": "", "label": "", "conv": "", "decimals": -1})
     return out
 
 
@@ -346,6 +396,8 @@ def box_label(layout: dict, name: str) -> str:
         return g.get("text") or "Text"
     if g["type"] == "image":
         return g.get("label") or "Logo"
+    if g["type"] in LIVE_TYPES:
+        return g.get("label") or GAUGE_TYPES[g["type"]]
     return g.get("label") or g.get("src", "").replace("col:", "") or name
 
 
@@ -531,6 +583,46 @@ def draw_map(f: Frame, box, st: Style, track_img: Image.Image, cur_xy):
         cy = y + inset + cur_xy[1] * (h - 2 * inset)
         _dot(f, cx, cy, 9 * k, fill=st.accent, outline=(0, 0, 0, 200),
              width=max(1.0, 2 * k))
+
+
+SNAP_MARGIN = 0.03      # inset from the frame edge, as a share of the height
+
+
+def snap(x: float, y: float, bw: float, bh: float, w: float, h: float,
+         tol: float) -> tuple[float, float, list]:
+    """Snap a gauge box (top-left x, y; size bw x bh; frame w x h, all px)
+    to the frame's centre lines, its edges, and a small inset from them, so
+    the corners come for free. Each axis snaps on its own, to whichever
+    target is nearest within tol. Returns (x, y, guides) where guides are
+    ("v", px) / ("h", px) lines to draw."""
+    m = SNAP_MARGIN * h
+    guides = []
+
+    def axis(pos, size, full, kind):
+        cands = [(0.0, 0.0), (m, m), (full - size, full), (full - m - size, full - m),
+                 ((full - size) / 2, full / 2)]
+        best = min(cands, key=lambda c: abs(c[0] - pos))
+        if abs(best[0] - pos) <= tol:
+            guides.append((kind, best[1]))
+            return best[0]
+        return pos
+    nx = axis(x, bw, w, "v")
+    ny = axis(y, bh, h, "h")
+    return nx, ny, guides
+
+
+def draw_guides(f: Frame, guides):
+    """Dashed snap lines across the frame (layout edit mode)."""
+    col = (90, 200, 255, 230)
+    dash = max(6, f.h // 90)
+    for kind, p in guides or ():
+        n = (f.h if kind == "v" else f.w) // (dash * 2) + 1
+        for i in range(n):
+            a0, a1 = i * dash * 2, i * dash * 2 + dash
+            if kind == "v":
+                f.draw.line([p, a0, p, a1], fill=col, width=2)
+            else:
+                f.draw.line([a0, p, a1, p], fill=col, width=2)
 
 
 def draw_edit_boxes(f: Frame, boxes: dict, names, active: str | None = None,
@@ -883,5 +975,206 @@ def draw_text_gauge(f: Frame, box, st: Style, g: dict, _v=None):
           anchor="mm")
 
 
+# ------------------------------------------------------------- delta bar --
+
+TREND_BLEND = 0.08    # s/s: gaining or losing this fast is fully green / red
+AHEAD_BLEND = 0.05    # s: this far ahead or behind is fully green / red
+
+
+def good_bad(x: float) -> tuple:
+    """Colour from red (x very negative) to green (x very positive), mixed
+    straight between the two and changing smoothly around 0."""
+    s = 0.5 * (1.0 + math.tanh(x))              # 0 = red .. 1 = green
+    return tuple(int(round(a + (b_ - a) * s)) for a, b_ in zip(BAD[:3], GOOD[:3])) + (255,)
+
+
+def draw_delta(f: Frame, box, st: Style, g: dict, v: dict):
+    """iRacing-style delta bar. v: delta (s or None), rate (s/s or None),
+    ref (lap number or None)."""
+    x, y, w, h, k = box
+    _panel(f, box, st)
+    pad = 8 * k
+    bx0, bx1 = x + pad, x + w - pad
+    by0, by1 = y + pad, y + h - pad
+    cx = (bx0 + bx1) / 2
+    r = max(1, int(6 * k))
+    f.draw.rounded_rectangle([bx0, by0, bx1, by1], radius=r, fill=(0, 0, 0, 160))
+    d = v.get("delta")
+    ok = d is not None and math.isfinite(d)
+    if ok:
+        rate = v.get("rate")
+        if g.get("trend") and rate is not None and math.isfinite(rate):
+            col = good_bad(-rate / TREND_BLEND)       # catching up = green
+        else:
+            col = good_bad(-d / AHEAD_BLEND)          # ahead = green
+        frac = max(-1.0, min(1.0, d / max(0.1, float(g.get("range", 1.0)))))
+        if g.get("green", "left") == "right":
+            frac = -frac
+        end = cx + frac * (bx1 - bx0) / 2
+        if abs(end - cx) > 1:
+            f.draw.rectangle([min(cx, end), by0 + 2 * k, max(cx, end), by1 - 2 * k],
+                             fill=col[:3] + (215,))
+    else:
+        col = st.dim
+    # scale marks: quarter, half, three quarters of the range each side
+    for q in (0.25, 0.5, 0.75):
+        for sgn in (-1, 1):
+            tx = cx + sgn * q * (bx1 - bx0) / 2
+            f.draw.line([tx, by1 - 9 * k, tx, by1 - 2 * k], fill=(255, 255, 255, 90),
+                        width=max(1, int(2 * k)))
+    # the number in the middle, with a heavy black outline so it reads over
+    # the fill without hiding the bar
+    nf = _font(46 * k, st.font)
+    txt = f"{d:+.2f}" if ok else "-.--"
+    f.draw.text((cx, (by0 + by1) / 2), txt, font=nf, anchor="mm",
+                fill=col if ok else st.dim, stroke_width=max(2, int(round(5 * k))),
+                stroke_fill=(0, 0, 0, 255))
+    if v.get("ref"):
+        sf = _font(16 * k, st.font)
+        _text(f, (bx1 - 8 * k, by0 + 4 * k), f"vs LAP {v['ref']}", sf, (255, 255, 255, 170),
+              st, k, anchor="ra")
+
+
+# ------------------------------------------------------------------ dash ----
+
+LED_COLORS = [(40, 210, 80, 255)] * 4 + [(250, 205, 40, 255)] * 3 + [(240, 55, 45, 255)] * 3
+LED_FLASH = (70, 140, 255, 255)
+DASH_YELLOW = (250, 220, 50, 255)
+
+
+def draw_dash(f: Frame, box, st: Style, g: dict, v: dict):
+    """A race dash: shift lights, RPM bar graph, gear (or speed without
+    RPM), four channel slots, brake/throttle bars and a footer line.
+
+    v: rpm, rpm_max, shift_lo, shift_hi, flash (bool), gear (int|None),
+    center ("gear"|"speed"), speed, speed_unit, slots [(label, text, unit,
+    has)], throttle, brake (0..1 or None), footer, lap."""
+    x, y, w, h, k = box
+    r_out = 34 * k
+    # housing and the LEDs along its top
+    f.draw.rounded_rectangle([x, y, x + w, y + h], radius=int(r_out), fill=(28, 29, 32, 235),
+                             outline=(70, 72, 78, 255), width=max(1, int(3 * k)))
+    n = len(LED_COLORS)
+    led_r = 9 * k
+    span = w * 0.52
+    lx0 = x + (w - span) / 2
+    rpm, lo, hi = v.get("rpm"), v.get("shift_lo"), v.get("shift_hi")
+    lit = 0
+    full = False
+    if rpm is not None and lo is not None and hi is not None and hi > lo:
+        if rpm >= hi:
+            lit, full = n, True
+        elif rpm > lo:
+            lit = int(math.ceil((rpm - lo) / (hi - lo) * n))
+    for i in range(n):
+        cxl = lx0 + span * (i + 0.5) / n
+        cyl = y + 22 * k
+        if full:
+            col = LED_FLASH if v.get("flash") else (40, 40, 44, 255)
+        elif i < lit:
+            col = LED_COLORS[i]
+        else:
+            col = (52, 53, 58, 255)
+        f.draw.ellipse([cxl - led_r, cyl - led_r, cxl + led_r, cyl + led_r], fill=col,
+                       outline=(15, 15, 17, 255), width=max(1, int(2 * k)))
+    # the screen
+    sx0, sy0, sx1, sy1 = x + 26 * k, y + 44 * k, x + w - 26 * k, y + h - 22 * k
+    f.draw.rounded_rectangle([sx0, sy0, sx1, sy1], radius=int(12 * k), fill=(6, 6, 8, 245))
+    sw = sx1 - sx0
+    lf = _font(17 * k, st.font)
+    vf = _font(38 * k, st.font)
+    tf = _font(14 * k, st.font)
+    # RPM bar graph across the top, segments to rpm_max
+    rmax = v.get("rpm_max")
+    gy0, gy1 = sy0 + 10 * k, sy0 + 34 * k
+    gx0, gx1 = sx0 + 12 * k, sx1 - 12 * k
+    if rmax and rpm is not None:
+        segs = 40
+        sg_w = (gx1 - gx0) / segs
+        for i in range(segs):
+            a = rmax * i / segs
+            on = rpm is not None and rpm > a
+            red = hi is not None and a >= hi
+            col = ((235, 55, 45, 255) if red else (40, 200, 80, 255)) if on \
+                else (32, 34, 38, 255)
+            f.draw.rectangle([gx0 + i * sg_w + 1, gy0, gx0 + (i + 1) * sg_w - 2 * k, gy1],
+                             fill=col)
+        step = 1000.0 if rmax <= 12000 else 2000.0
+        t = step
+        while t <= rmax + 1e-6:
+            tx = gx0 + (gx1 - gx0) * t / rmax
+            red = hi is not None and t >= hi
+            _text(f, (tx, gy1 + 3 * k), f"{t / 1000:g}", tf,
+                  (235, 70, 60, 255) if red else (200, 200, 200, 255), st, k, anchor="ra")
+            t += step
+    top = gy1 + 22 * k if (rmax and rpm is not None) else sy0 + 16 * k
+    bottom = sy1 - 36 * k
+    # columns: slots | centre | pedals
+    pedals = g.get("pedals", True) and (v.get("throttle") is not None
+                                        or v.get("brake") is not None)
+    c1 = sx0 + sw * 0.40
+    c2 = sx0 + sw * 0.70 if pedals else sx1
+    dim_line = (60, 62, 68, 255)
+    for xx in (c1, c2) if pedals else (c1,):
+        f.draw.line([xx, top, xx, bottom], fill=dim_line, width=max(1, int(2 * k)))
+    f.draw.line([sx0 + 10 * k, bottom + 4 * k, sx1 - 10 * k, bottom + 4 * k], fill=dim_line,
+                width=max(1, int(2 * k)))
+    # four slots, 2 x 2
+    slots = [sl for sl in (v.get("slots") or [])[:4] if sl[0] or sl[1]]
+    cw, chh = (c1 - sx0) / 2, (bottom - top) / 2
+    for i, sl in enumerate(slots):
+        label, text, unit, has = sl
+        ox = sx0 + (i % 2) * cw + cw / 2
+        oy = top + (i // 2) * chh + max(0.0, (chh - 66 * k) / 2)
+        _text(f, (ox, oy), label, lf, DASH_YELLOW if has else st.dim, st, k, anchor="ma")
+        _text(f, (ox, oy + 62 * k), text if has else "--", vf,
+              (245, 245, 245, 255) if has else st.dim, st, k, anchor="ms")
+    # centre: RPM over a big gear, or speed when there's no RPM
+    cxm = (c1 + c2) / 2
+    if v.get("center") == "gear":
+        rf = _font(34 * k, st.font)
+        _text(f, (cxm, top + 2 * k), f"{rpm:.0f}" if rpm is not None else "", rf,
+              (245, 245, 245, 255), st, k, anchor="ma")
+        gear = v.get("gear")
+        gf = _font(118 * k, st.font)
+        _text(f, (cxm, bottom - 6 * k), "-" if not gear else str(gear), gf, DASH_YELLOW,
+              st, k, anchor="ms")
+    else:
+        sp = v.get("speed")
+        sf = _font(92 * k, st.font)
+        _text(f, (cxm, bottom - 30 * k), "--" if sp is None else f"{sp:.0f}", sf,
+              DASH_YELLOW, st, k, anchor="ms")
+        _text(f, (cxm, bottom - 6 * k), v.get("speed_unit", ""), lf, st.dim, st, k,
+              anchor="ms")
+    # brake / throttle bars (left out when the file has neither)
+    if pedals:
+        pw = (sx1 - c2) / 2
+        for j, (key, name, col) in enumerate((("brake", "Brake", (240, 60, 50, 255)),
+                                              ("throttle", "Throttle", (40, 210, 80, 255)))):
+            val = v.get(key)
+            bx = c2 + pw * j + pw / 2
+            bw = min(26 * k, pw * 0.4)
+            y0, y1 = top + 4 * k, bottom - 26 * k
+            outline = (120, 160, 230, 255) if val is not None else (60, 62, 68, 255)
+            f.draw.rectangle([bx - bw / 2, y0, bx + bw / 2, y1], outline=outline,
+                             width=max(1, int(2 * k)))
+            if val is not None and val > 0.005:
+                fy = y1 - (y1 - y0) * max(0.0, min(1.0, val))
+                f.draw.rectangle([bx - bw / 2 + 3 * k, fy, bx + bw / 2 - 3 * k, y1 - 3 * k],
+                                 fill=col)
+            _text(f, (bx, bottom - 4 * k), name, tf if pw < 90 * k else lf,
+                  (225, 225, 225, 255) if val is not None else st.dim, st, k, anchor="ms")
+    # footer: text left, lap right
+    fy = sy1 - 8 * k
+    ff = _font(22 * k, st.font)
+    if g.get("text"):
+        _text(f, (sx0 + 16 * k, fy), g["text"], ff, (235, 235, 235, 255), st, k,
+              anchor="ls")
+    if v.get("lap") is not None:
+        _text(f, (sx1 - 16 * k, fy), f"LAP {v['lap']}", ff, (235, 235, 235, 255), st, k,
+              anchor="rs")
+
+
 CUSTOM_DRAW = {"number": draw_number, "bar": draw_bar, "dial": draw_dial,
-               "image": draw_image, "text": draw_text_gauge}
+               "image": draw_image, "text": draw_text_gauge, "delta": draw_delta,
+               "dash": draw_dash}
