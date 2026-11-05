@@ -1294,6 +1294,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._vt_cache = 0.0
         self._slider_held = False
         self._drag = None  # (name, dx, dy) while moving a gauge
+        self._guides = ()  # snap lines to show while dragging
         self._hover = None
 
         self.setWindowTitle("")  # Qt adds "Race Overlay <version>"
@@ -1766,7 +1767,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_btn.toggled.connect(self._edit_toggled)
         gl.addWidget(self.edit_btn)
         gl.addWidget(_note("While on: drag gauges on the video, scroll the "
-                           "mouse wheel over one to resize it.", small=True))
+                           "mouse wheel over one to resize it. Gauges snap to the "
+                           "middle, the edges and the corners; hold Shift to place "
+                           "freely.", small=True))
         gl.addWidget(_note("<b>Your gauges</b> (any channel, logos, text):"))
         self.custom_list = QtWidgets.QListWidget()
         self.custom_list.setMinimumHeight(130)
@@ -2973,14 +2976,21 @@ class MainWindow(QtWidgets.QMainWindow):
         name, dx, dy = self._drag
         x0, y0, w, h = g
         L = gauges.entry(self.layout_, name)
-        L["x"] = max(0.0, min(1.0, (x - x0 - dx) / w))
-        L["y"] = max(0.0, min(1.0, (y - y0 - dy) / h))
+        px, py = x - x0 - dx, y - y0 - dy
+        self._guides = ()
+        if not (QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier):
+            _bx, _by, bw, bh, _k = gauges.layout_boxes(self.layout_, w, h)[name]
+            px, py, gl = gauges.snap(px, py, bw, bh, w, h, tol=max(6.0, 0.012 * w))
+            self._guides = tuple(gl)
+        L["x"] = max(0.0, min(1.0, px / w))
+        L["y"] = max(0.0, min(1.0, py / h))
         self._layout_rev += 1
         self._invalidate_overlay()
 
     def _video_released(self, x, y):
         if self._drag:
             self._drag = None
+            self._guides = ()
             self.video.setCursor(QtCore.Qt.OpenHandCursor)
             self._layout_changed()
 
@@ -3102,13 +3112,13 @@ class MainWindow(QtWidgets.QMainWindow):
         edit = self.edit_btn.isChecked()
         key = (round(v, 3), round(self.offset, 4), g, self._layout_rev, edit,
                self._hover, self.style_name, self.use_mph, self.invert_lat,
-               self.invert_lon, id(self.ctx))
+               self.invert_lon, id(self.ctx), self._guides)
         if key == self._ovl_key:
             return
         self._ovl_key = key
         f = gauges.Frame.new(w, h)
         draw_overlay(f, self.ctx, v + self.offset, edit=edit,
-                     active=self._drag[0] if self._drag else None)
+                     active=self._drag[0] if self._drag else None, guides=self._guides)
         self.overlay.show(f.img, x0, y0)
 
     # ==================================================== save / render ===

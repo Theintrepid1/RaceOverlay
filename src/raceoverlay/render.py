@@ -452,7 +452,7 @@ def corner_state(ctx: OverlayContext, t: float) -> dict:
 
 
 def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
-                 edit: bool = False, active: str | None = None):
+                 edit: bool = False, active: str | None = None, guides=()):
     """Draw every enabled gauge for telemetry time `t` onto frame `f`."""
     st = ctx.style
     boxes = gauges.layout_boxes(ctx.layout, f.w, f.h)
@@ -491,6 +491,7 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
         elif name == "corner":
             gauges.draw_corner(f, box, st, corner_state(ctx, t))
     if edit:
+        gauges.draw_guides(f, guides)
         gauges.draw_edit_boxes(f, boxes, shown, active, ctx.labels())
 
 

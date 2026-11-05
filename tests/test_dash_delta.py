@@ -127,8 +127,9 @@ def test_full_overlay_draws_both():
 def test_delta_colour_blends_and_lap_timer_drops_its_delta():
     reds, greens = gauges.good_bad(-5), gauges.good_bad(5)
     assert reds[:3] == gauges.BAD[:3] and greens[:3] == gauges.GOOD[:3]
-    mid = gauges.good_bad(0)
-    assert mid[0] > 150 and mid[1] > 150          # yellow-ish, not brown
+    mid = gauges.good_bad(0)                      # a straight mix, no yellow stop
+    assert mid[:3] == tuple(round((a + b) / 2) for a, b in zip(gauges.BAD[:3],
+                                                                gauges.GOOD[:3]))
     # a little ahead is greener than a little behind, both in between
     a, b = gauges.good_bad(0.3), gauges.good_bad(-0.3)
     assert a[1] > b[1] and a[0] < b[0]
@@ -149,3 +150,18 @@ def test_delta_colour_blends_and_lap_timer_drops_its_delta():
         assert s["delta"] is None and not s["bar"] and s["time"] > 0
     finally:
         gauges.draw_laptimer = real
+
+
+def test_snap_to_centre_edges_and_corners():
+    W, H = 1920, 1080
+    m = gauges.SNAP_MARGIN * H
+    # near the middle: centred both ways
+    x, y, gl = gauges.snap(655, 391, 600, 300, W, H, tol=12)
+    assert (x, y) == (660, 390) and set(gl) == {("v", 960), ("h", 540)}
+    # near the bottom-right inset corner
+    x, y, gl = gauges.snap(W - m - 200 + 5, H - m - 100 - 7, 200, 100, W, H, tol=12)
+    assert (x, y) == (W - m - 200, H - m - 100)
+    # flush to the top-left corner
+    assert gauges.snap(3, 4, 200, 100, W, H, tol=12)[:2] == (0, 0)
+    # far from everything: left alone, no guides
+    assert gauges.snap(400, 200, 200, 100, W, H, tol=12) == (400, 200, [])

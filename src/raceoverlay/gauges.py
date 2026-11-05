@@ -585,6 +585,46 @@ def draw_map(f: Frame, box, st: Style, track_img: Image.Image, cur_xy):
              width=max(1.0, 2 * k))
 
 
+SNAP_MARGIN = 0.03      # inset from the frame edge, as a share of the height
+
+
+def snap(x: float, y: float, bw: float, bh: float, w: float, h: float,
+         tol: float) -> tuple[float, float, list]:
+    """Snap a gauge box (top-left x, y; size bw x bh; frame w x h, all px)
+    to the frame's centre lines, its edges, and a small inset from them, so
+    the corners come for free. Each axis snaps on its own, to whichever
+    target is nearest within tol. Returns (x, y, guides) where guides are
+    ("v", px) / ("h", px) lines to draw."""
+    m = SNAP_MARGIN * h
+    guides = []
+
+    def axis(pos, size, full, kind):
+        cands = [(0.0, 0.0), (m, m), (full - size, full), (full - m - size, full - m),
+                 ((full - size) / 2, full / 2)]
+        best = min(cands, key=lambda c: abs(c[0] - pos))
+        if abs(best[0] - pos) <= tol:
+            guides.append((kind, best[1]))
+            return best[0]
+        return pos
+    nx = axis(x, bw, w, "v")
+    ny = axis(y, bh, h, "h")
+    return nx, ny, guides
+
+
+def draw_guides(f: Frame, guides):
+    """Dashed snap lines across the frame (layout edit mode)."""
+    col = (90, 200, 255, 230)
+    dash = max(6, f.h // 90)
+    for kind, p in guides or ():
+        n = (f.h if kind == "v" else f.w) // (dash * 2) + 1
+        for i in range(n):
+            a0, a1 = i * dash * 2, i * dash * 2 + dash
+            if kind == "v":
+                f.draw.line([p, a0, p, a1], fill=col, width=2)
+            else:
+                f.draw.line([a0, p, a1, p], fill=col, width=2)
+
+
 def draw_edit_boxes(f: Frame, boxes: dict, names, active: str | None = None,
                     labels: dict | None = None):
     """Outline each movable gauge with its name (layout edit mode)."""
@@ -942,15 +982,10 @@ AHEAD_BLEND = 0.05    # s: this far ahead or behind is fully green / red
 
 
 def good_bad(x: float) -> tuple:
-    """Colour from red (x very negative) through yellow to green (x very
-    positive), changing smoothly around 0. Goes round the hue circle, not a
-    straight RGB mix, so the middle is a clean yellow rather than brown."""
-    import colorsys
+    """Colour from red (x very negative) to green (x very positive), mixed
+    straight between the two and changing smoothly around 0."""
     s = 0.5 * (1.0 + math.tanh(x))              # 0 = red .. 1 = green
-    h0 = colorsys.rgb_to_hsv(*(c / 255 for c in BAD[:3]))
-    h1 = colorsys.rgb_to_hsv(*(c / 255 for c in GOOD[:3]))
-    hsv = [a + (b_ - a) * s for a, b_ in zip(h0, h1)]
-    return tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(*hsv)) + (255,)
+    return tuple(int(round(a + (b_ - a) * s)) for a, b_ in zip(BAD[:3], GOOD[:3])) + (255,)
 
 
 def draw_delta(f: Frame, box, st: Style, g: dict, v: dict):
