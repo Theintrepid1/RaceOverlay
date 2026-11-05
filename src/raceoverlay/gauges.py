@@ -971,15 +971,13 @@ def draw_delta(f: Frame, box, st: Style, g: dict, v: dict):
             tx = cx + sgn * q * (bx1 - bx0) / 2
             f.draw.line([tx, by1 - 9 * k, tx, by1 - 2 * k], fill=(255, 255, 255, 90),
                         width=max(1, int(2 * k)))
-    # the number on a dark pill in the middle
+    # the number in the middle, with a heavy black outline so it reads over
+    # the fill without hiding the bar
     nf = _font(46 * k, st.font)
     txt = f"{d:+.2f}" if ok else "-.--"
-    tw = f.draw.textlength("+88.88", font=nf)
-    pw, ph = tw + 24 * k, (by1 - by0) - 6 * k
-    py0 = (by0 + by1) / 2 - ph / 2
-    f.draw.rounded_rectangle([cx - pw / 2, py0, cx + pw / 2, py0 + ph], radius=r,
-                             fill=(10, 10, 12, 225))
-    _text(f, (cx, (by0 + by1) / 2), txt, nf, col if ok else st.dim, st, k, anchor="mm")
+    f.draw.text((cx, (by0 + by1) / 2), txt, font=nf, anchor="mm",
+                fill=col if ok else st.dim, stroke_width=max(2, int(round(5 * k))),
+                stroke_fill=(0, 0, 0, 255))
     if v.get("ref"):
         sf = _font(16 * k, st.font)
         _text(f, (bx1 - 8 * k, by0 + 4 * k), f"vs LAP {v['ref']}", sf, (255, 255, 255, 170),
