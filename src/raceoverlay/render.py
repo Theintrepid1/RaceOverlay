@@ -107,6 +107,11 @@ class OverlayContext:
     opts: dict = field(default_factory=lambda: dict(gauges.DEFAULT_OPTS))
     laps: LapModel | None = None
     corners: CornerModel | None = None
+    # picture-in-picture: telemetry times the second camera covers, and (in
+    # the preview) a function telemetry time -> PIL frame
+    pip_span: tuple[float, float] | None = None
+    pip_frame: object = None
+    pip_placeholder: bool = False
     _track_cache: dict = field(default_factory=dict, repr=False)
     _range_cache: dict = field(default_factory=dict, repr=False)
 
@@ -151,13 +156,17 @@ class OverlayContext:
             return self.laps is not None and self.laps.ok
         if g["type"] == "dash":
             return True               # shows whatever the file has
+        if g["type"] == "pip":
+            return self.pip_span is not None
         return self.telem.has(g["src"])
 
     def shown(self) -> list[str]:
         """Gauges to draw, in draw order (map first, built-ins last)."""
         out = ["map"] if "map" in self.available and self.layout["map"]["on"] else []
-        out += [g["id"] for g in self.layout.get("custom", [])
-                if g["on"] and self.gauge_available(g)]
+        cust = [g for g in self.layout.get("custom", []) if g["on"] and self.gauge_available(g)]
+        # the second camera goes under every other gauge
+        out += [g["id"] for g in cust if g["type"] == "pip"][:1]
+        out += [g["id"] for g in cust if g["type"] != "pip"]
         out += [n for n in ("gball", "laptimer", "corner")
                 if n in self.available and self.layout[n]["on"]]
         return out
@@ -471,6 +480,12 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
                 v = delta_state(ctx, t)
             elif g["type"] == "dash":
                 v = ctx.dash_values(g, t)
+            elif g["type"] == "pip":
+                lo, hi = ctx.pip_span or (0.0, -1.0)
+                show = lo <= t <= hi
+                img = ctx.pip_frame(t) if (show and ctx.pip_frame) else None
+                v = {"show": show, "img": img,
+                     "placeholder": show and img is None and ctx.pip_placeholder}
             else:
                 v = None
             gauges.CUSTOM_DRAW[g["type"]](f, box, st, g, v)

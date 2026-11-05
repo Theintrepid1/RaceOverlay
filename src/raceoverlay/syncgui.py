@@ -27,6 +27,7 @@ import numpy as np
 
 from racecore import gosync, osutil, telemetry  # noqa: E402
 
+from . import pip as pipmod
 from . import cards as cardmod
 from . import naming
 from . import gauges  # noqa: E402  (Qt imported in main/below)
@@ -1024,6 +1025,91 @@ class DashDialog(QtWidgets.QDialog):
         return gauges.normalize_gauge(g)
 
 
+class PipDialog(QtWidgets.QDialog):
+    """The picture-in-picture box: crop, corners, border and see-through."""
+
+    def __init__(self, parent, g: dict, info=None):
+        super().__init__(parent)
+        self.setWindowTitle("Picture-in-picture")
+        self.g = gauges.normalize_gauge(dict(g))
+        self.info = info
+        lay = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        lay.addLayout(form)
+        crop = QtWidgets.QGridLayout()
+        self.crop = []
+        for i, name in enumerate(("Left", "Top", "Right", "Bottom")):
+            sp = QtWidgets.QSpinBox()
+            sp.setRange(0, 45)
+            sp.setSuffix(" %")
+            sp.setValue(int(round(self.g["crop"][i] * 100)))
+            crop.addWidget(QtWidgets.QLabel(name), i // 2, (i % 2) * 2)
+            crop.addWidget(sp, i // 2, (i % 2) * 2 + 1)
+            self.crop.append(sp)
+        cw = QtWidgets.QWidget()
+        cw.setLayout(crop)
+        crop.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Crop", cw)
+        self.radius = QtWidgets.QSpinBox()
+        self.radius.setRange(0, 200)
+        self.radius.setSuffix(" px")
+        self.radius.setValue(self.g["radius"])
+        form.addRow("Corner rounding", self.radius)
+        brow = QtWidgets.QHBoxLayout()
+        self.border = QtWidgets.QSpinBox()
+        self.border.setRange(0, 30)
+        self.border.setSuffix(" px")
+        self.border.setValue(self.g["border"])
+        self.color_cb = QtWidgets.QComboBox()
+        for t, v in (("White", "fg"), ("Accent (style color)", "accent"), ("Black", "#000000")):
+            self.color_cb.addItem(t, v)
+        col = self.g.get("color") or "fg"
+        if self.color_cb.findData(col) < 0:
+            self.color_cb.addItem(f"Custom {col}", col)
+        self.color_cb.setCurrentIndex(self.color_cb.findData(col))
+        brow.addWidget(self.border)
+        brow.addWidget(self.color_cb, 1)
+        brow.addWidget(_btn("Pick…", self._pick_color))
+        form.addRow("Border", brow)
+        orow = QtWidgets.QHBoxLayout()
+        self.op = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.op.setRange(10, 100)
+        self.op.setValue(int(self.g.get("opacity", 100)))
+        self.op_lbl = QtWidgets.QLabel(f"{self.op.value()}%")
+        self.op.valueChanged.connect(lambda v: self.op_lbl.setText(f"{v}%"))
+        orow.addWidget(self.op, 1)
+        orow.addWidget(self.op_lbl)
+        form.addRow("Opacity", orow)
+        lay.addWidget(_note("Sizes are at 1080p and scale with the video. Move and "
+                            "resize the box with \"Move && resize gauges\"; it snaps "
+                            "like the gauges.", small=True))
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(460, 0)
+
+    def _pick_color(self):
+        c = QtWidgets.QColorDialog.getColor(parent=self)
+        if c.isValid():
+            hx = c.name()
+            i = self.color_cb.findData(hx)
+            if i < 0:
+                self.color_cb.addItem(f"Custom {hx}", hx)
+                i = self.color_cb.count() - 1
+            self.color_cb.setCurrentIndex(i)
+
+    def result_gauge(self) -> dict:
+        g = dict(self.g)
+        g.update(crop=[sp.value() / 100 for sp in self.crop], radius=self.radius.value(),
+                 border=self.border.value(), color=self.color_cb.currentData(),
+                 opacity=self.op.value())
+        if self.info is not None:
+            g["aspect"] = pipmod.aspect_for(self.info, g)
+        return gauges.normalize_gauge(g)
+
+
 def import_logo(path: str) -> tuple[str, float]:
     """Copy a logo into gauges.logos_dir() (an SVG is drawn to a PNG first).
     Returns (file name there, height / width)."""
@@ -1287,6 +1373,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._hw_applied = False
         self._autosync_busy = False
         self._autosync_res = None  # set by the auto-sync thread, read in _tick
+        self.pip_src = None        # pip.PipSource: the second camera, if any
+        self.pip_info = None       # its media.MediaInfo
+        self.pip_reader = None     # pip.PipReader for the preview
+        self._pip_img = None
+        self._pipsync_res = None
+        self._pipsync_busy = False
         threading.Thread(target=self._detect_hw, daemon=True).start()
         self._proc_err = ""
         self._ovl_key = None
@@ -1499,6 +1591,63 @@ class MainWindow(QtWidgets.QMainWindow):
         crow.addWidget(self.lap_jump, 1)
         l2.addLayout(crow)
         pv.addWidget(box2)
+
+        # second camera: tucked behind one button until it's wanted
+        self.pip_btn = QtWidgets.QToolButton()
+        self.pip_btn.setText("Second camera (picture-in-picture)")
+        self.pip_btn.setCheckable(True)
+        self.pip_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.pip_btn.setArrowType(QtCore.Qt.RightArrow)
+        self.pip_btn.setAutoRaise(True)
+        self.pip_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pip_btn.setToolTip("Show a second GoPro (driver-facing, rear...) in a box "
+                                "on the video")
+        self.pip_btn.toggled.connect(self._pip_toggled)
+        pv.addWidget(self.pip_btn)
+        self.pip_panel = QtWidgets.QWidget()
+        l3 = QtWidgets.QVBoxLayout(self.pip_panel)
+        l3.setContentsMargins(18, 0, 0, 4)
+        prow = QtWidgets.QHBoxLayout()
+        self.pip_lbl = _note("<i>none</i>")
+        self.pip_lbl.setWordWrap(True)
+        prow.addWidget(self.pip_lbl, 1)
+        prow.addWidget(_btn("Open…", self._choose_pip,
+                            "A second GoPro recording to show in a box on the video"))
+        self.btn_pip_remove = _btn("Remove", self._remove_pip)
+        prow.addWidget(self.btn_pip_remove)
+        l3.addLayout(prow)
+        self.btn_pipsync = _btn("Auto-sync second camera", self._pip_auto_sync,
+                                "Match its accelerometer to the data file, the same way "
+                                "as the main camera (sync the main camera first)")
+        l3.addWidget(self.btn_pipsync)
+        ngrid = QtWidgets.QGridLayout()
+        ngrid.addWidget(_note("Earlier"), 0, 0)
+        ngrid.addWidget(_note("Later"), 1, 0)
+        for i, (lbl, d) in enumerate((("1s", 1.0), ("0.1s", 0.1), ("1 frame", "f"))):
+            ngrid.addWidget(_btn(f"- {lbl}", lambda _=False, d=d: self._pip_nudge(d, -1),
+                                 "Show its footage from earlier"), 0, 1 + i)
+            ngrid.addWidget(_btn(f"+ {lbl}", lambda _=False, d=d: self._pip_nudge(d, +1),
+                                 "Show its footage from later"), 1, 1 + i)
+        l3.addLayout(ngrid)
+        self.pip_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.pip_offset_spin.setRange(-100000.0, 100000.0)
+        self.pip_offset_spin.setDecimals(3)
+        self.pip_offset_spin.setSingleStep(0.1)
+        self.pip_offset_spin.setSuffix(" s")
+        self.pip_offset_spin.setFocusPolicy(QtCore.Qt.ClickFocus)
+        self.pip_offset_spin.setToolTip("Second camera time = main video time + this")
+        self.pip_offset_spin.valueChanged.connect(lambda v: self._set_pip_offset(v, True))
+        orow2 = QtWidgets.QHBoxLayout()
+        orow2.addWidget(_note("Offset"))
+        orow2.addWidget(self.pip_offset_spin, 1)
+        l3.addLayout(orow2)
+        l3.addWidget(_note("Its box moves, resizes and snaps like a gauge; Edit… it in "
+                           "the Look tab's gauge list for crop, corners and border.",
+                           small=True))
+        self.pip_panel.setVisible(False)
+        for wdg in (self.btn_pip_remove, self.btn_pipsync, self.pip_offset_spin):
+            wdg.setEnabled(False)            # until there's a second camera
+        pv.addWidget(self.pip_panel)
 
         self.status = _note("")
         pv.addWidget(self.status)
@@ -2069,6 +2218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if saved.get("g_rotate") is not None and not saved.get("g_auto", True):
             self.g_manual = (float(saved["g_rotate"]), bool(saved.get("g_flip")))
         self._load_trim(saved)
+        self._set_pip(pipmod.PipSource.from_dict(saved.get("pip")), quiet=True)
         self._sync_look_widgets()
 
         csv = saved.get("csv")
@@ -2183,6 +2333,7 @@ class MainWindow(QtWidgets.QMainWindow):
             invert_lon=self.invert_lon, opts=self.gauge_opts)
         self.gauge_opts = self.ctx.opts  # share one dict so edits apply live
         self.layout_ = self.ctx.layout  # share one dict so edits apply live
+        self._apply_pip_ctx()
         self._invalidate_overlay()
 
     def _sync_look_widgets(self):
@@ -2351,6 +2502,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_offset(self, value: float, from_spin: bool, quiet=False):
         self.offset = float(value)
+        self._apply_pip_ctx()
         if not from_spin:
             self.offset_spin.blockSignals(True)
             self.offset_spin.setValue(self.offset)
@@ -2514,12 +2666,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 name = g.get("label") or src_label(self.telem, g["src"])
             else:
                 name = gauges.box_label(self.layout_, g["id"])
-            text = (name if g["type"] in gauges.LIVE_TYPES and name == gauges.GAUGE_TYPES[g["type"]]
+            text = (name if name == gauges.GAUGE_TYPES[g["type"]]
                     else f"{name}  ·  {gauges.GAUGE_TYPES[g['type']]}")
             ok = self.ctx is None or self.ctx.gauge_available(g)
             if not ok:
                 text += ("   (picture missing)" if g["type"] == "image" else
-                         "   (no laps)" if g["type"] == "delta" else "   (no data)")
+                         "   (no laps)" if g["type"] == "delta" else
+                         "   (no second camera)" if g["type"] == "pip" else "   (no data)")
             it = QtWidgets.QListWidgetItem(text)
             it.setData(QtCore.Qt.UserRole, g["id"])
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
@@ -2530,6 +2683,8 @@ class MainWindow(QtWidgets.QMainWindow):
                               "again." if g["type"] == "image" else
                               "No timed laps in this file, so there's no delta."
                               if g["type"] == "delta" else
+                              "Open a second camera's video on the Sync tab."
+                              if g["type"] == "pip" else
                               f"'{src_label(self.telem, g['src'])}' isn't in "
                               "this file, so this gauge is skipped.")
             self.custom_list.addItem(it)
@@ -2582,6 +2737,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.custom_list.setCurrentRow(self.custom_list.count() - 1)
 
     def _live_dialog(self, g: dict):
+        if g["type"] == "pip":
+            return PipDialog(self, g, self.pip_info)
         return DeltaDialog(self, g) if g["type"] == "delta" else DashDialog(self, self.ctx, g)
 
     def _add_live(self, kind: str):
@@ -2602,7 +2759,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _edit_gauge(self):
         g = self._selected_gauge()
-        if g is not None and g["type"] in gauges.LIVE_TYPES:
+        if g is not None and (g["type"] in gauges.LIVE_TYPES or g["type"] == "pip"):
             dlg = self._live_dialog(g)
             if dlg.exec():
                 g.update(dlg.result_gauge())
@@ -3079,6 +3236,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._apply_hw()
         if self._autosync_res is not None:
             self._finish_auto_sync()
+        if self._pipsync_res is not None:
+            self._finish_pip_sync()
         if self.info is None:
             self.time_lbl.setText("")
             return
@@ -3098,6 +3257,188 @@ class MainWindow(QtWidgets.QMainWindow):
                             padding=0)
         self._update_overlay(v)
 
+    # ----- second camera (picture-in-picture) -----
+
+    def _set_pip(self, src, quiet: bool = False):
+        """Use src (pip.PipSource or None) as the second camera."""
+        if self.pip_reader is not None:
+            self.pip_reader.close()
+            self.pip_reader = None
+        self.pip_src, self.pip_info = src, None
+        if src is not None:
+            missing = [p for p in src.parts if not os.path.exists(p)]
+            if not missing:
+                try:
+                    self.pip_info = media.probe(src.parts)
+                except Exception as e:  # noqa: BLE001 - shown in the status
+                    self._set_status(f"Can't read the second camera's video: {e}")
+            elif not quiet:
+                self._set_status("The second camera's video isn't there any more: "
+                                 + Path(missing[0]).name)
+        if self.pip_info is not None:
+            self.pip_reader = pipmod.PipReader(self.pip_info, width=480)
+        self._fill_pip_widgets()
+        self._apply_pip_ctx()
+        self._fill_custom_list()
+        self._invalidate_overlay()
+
+    def _fill_pip_widgets(self):
+        if not hasattr(self, "pip_lbl"):
+            return
+        src = self.pip_src
+        if src is None:
+            self.pip_lbl.setText("<i>none</i>")
+        else:
+            name = html.escape(Path(src.parts[0]).name)
+            more = f" <small>+{len(src.parts) - 1} more</small>" if len(src.parts) > 1 else ""
+            state = ("" if self.pip_info else " <small>(file missing)</small>")
+            sync = " · synced" if src.synced else " · <b>not synced yet</b>"
+            self.pip_lbl.setText(name + more + state + (sync if self.pip_info else ""))
+            self.pip_lbl.setToolTip("\n".join(src.parts))
+        self.pip_btn.setText("Second camera (picture-in-picture)" if src is None else
+                             f"Second camera  (on: {Path(src.parts[0]).name})")
+        if src is not None and not self.pip_btn.isChecked():
+            self.pip_btn.setChecked(True)
+        on = src is not None and self.pip_info is not None
+        for wdg in (self.btn_pip_remove,):
+            wdg.setEnabled(src is not None)
+        self.btn_pipsync.setEnabled(on and not self._pipsync_busy)
+        self.pip_offset_spin.setEnabled(on)
+        self.pip_offset_spin.blockSignals(True)
+        self.pip_offset_spin.setValue(src.offset if src else 0.0)
+        self.pip_offset_spin.blockSignals(False)
+
+    def _apply_pip_ctx(self):
+        if self.ctx is None:
+            return
+        if self.pip_src is not None and self.pip_info is not None:
+            self.ctx.pip_span = pipmod.span(self.pip_info, self.pip_src.offset, self.offset)
+            self.ctx.pip_frame = lambda _t: self._pip_img
+            self.ctx.pip_placeholder = True
+        else:
+            self.ctx.pip_span, self.ctx.pip_frame = None, None
+        self._invalidate_overlay()
+
+    def _choose_pip(self):
+        if self.video_path is None:
+            QtWidgets.QMessageBox.information(self, "Open the main video first",
+                                              "Open the main video on the Sync tab first.")
+            return
+        p = pick_file(self, "Second camera video", "video",
+                      "Videos (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
+        if not p:
+            return
+        parts = media.find_chapters(p) or [p]
+        if len(parts) > 1:
+            r = QtWidgets.QMessageBox.question(
+                self, "GoPro recording in parts",
+                f"This recording is split into {len(parts)} files. Use them all?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes)
+            if r != QtWidgets.QMessageBox.Yes:
+                parts = [p]
+        self._set_pip(pipmod.PipSource(list(parts), 0.0, False))
+        if self.pip_info is None:
+            return
+        # a box for it, bottom right, unless the layout has one already
+        g = pipmod.gauge_of(self.layout_)
+        if g is None:
+            g = gauges.normalize_gauge(dict(
+                id=gauges.new_gauge_id(self.layout_), type="pip", color="fg",
+                aspect=pipmod.aspect_for(self.pip_info, {}), scale=0.8))
+            bw, bh = gauges.base_size(g)
+            g["x"] = 0.905 - bw * 0.8 / 1920      # bottom right, left of the pedal bars
+            g["y"] = 1 - gauges.SNAP_MARGIN - bh * 0.8 / 1080
+            self.layout_.setdefault("custom", []).append(g)
+        else:
+            g["aspect"] = pipmod.aspect_for(self.pip_info, g)
+        self._layout_changed()
+        self._fill_custom_list()
+        self._save(quiet=True)
+        if self.synced and self.telem is not None:
+            self._pip_auto_sync()
+        else:
+            self._set_status("Second camera added. Sync the main video, then press "
+                             "Auto-sync second camera (or shift it by hand).")
+
+    def _remove_pip(self):
+        self._set_pip(None)
+        self._save(quiet=True)
+        self._set_status("Second camera removed (its box stays in the gauge list; "
+                         "untick or delete it there).")
+
+    def _set_pip_offset(self, value: float, from_spin: bool = False):
+        if self.pip_src is None:
+            return
+        self.pip_src.offset = float(value)
+        if not from_spin:
+            self.pip_offset_spin.blockSignals(True)
+            self.pip_offset_spin.setValue(self.pip_src.offset)
+            self.pip_offset_spin.blockSignals(False)
+        self._apply_pip_ctx()
+        self._save(quiet=True)
+
+    def _pip_nudge(self, d, sign: int):
+        if self.pip_src is None:
+            return
+        if d == "f":
+            d = 1.0 / (self.pip_info.fps if self.pip_info else 30.0)
+        self._set_pip_offset(self.pip_src.offset + sign * d)
+
+    def _pip_toggled(self, on: bool):
+        self.pip_panel.setVisible(on)
+        self.pip_btn.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+
+    def _pip_auto_sync(self):
+        if self.pip_src is None or self.pip_info is None or self._pipsync_busy:
+            return
+        if self.telem is None or not self.synced:
+            self._set_status("Sync the main video first: the second camera is lined up "
+                             "through the data file.")
+            return
+        parts = [(p.path, p.start) for p in self.pip_info.parts]
+        telem, main_off = self.telem, self.offset
+        self._pipsync_busy = True
+        self.btn_pipsync.setEnabled(False)
+        self.btn_pipsync.setText("Reading its sensors…")
+
+        def work():
+            try:
+                off, res = pipmod.sync_offset(parts, telem, main_off)
+                self._pipsync_res = ("ok", off, res)
+            except gosync.NoCameraData:
+                self._pipsync_res = ("nodata", None, None)
+            except Exception as e:  # noqa: BLE001 - shown to the user
+                self._pipsync_res = ("error", str(e), None)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_pip_sync(self):
+        kind, off, res = self._pipsync_res
+        self._pipsync_res = None
+        self._pipsync_busy = False
+        self.btn_pipsync.setText("Auto-sync second camera")
+        self._fill_pip_widgets()
+        if kind == "nodata":
+            self._set_status("The second camera's video has no GoPro sensor data. "
+                             "Shift it by hand to line it up.")
+            return
+        if kind == "error":
+            self._set_status(f"Second camera sync failed: {off}")
+            return
+        if not res.confident:
+            r = QtWidgets.QMessageBox.question(
+                self, "Weak match",
+                f"The second camera's best match is weak ({res.score:.0%}, next best "
+                f"{res.runner_up:.0%}). Use it anyway? You can shift it by hand after.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if r != QtWidgets.QMessageBox.Yes:
+                return
+        self.pip_src.synced = True
+        self._set_pip_offset(off)
+        self._fill_pip_widgets()
+        self._set_status(f"Second camera synced (match {res.score:.0%}).")
+
     def _invalidate_overlay(self):
         self._ovl_key = None
 
@@ -3110,9 +3451,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         x0, y0, w, h = g
         edit = self.edit_btn.isChecked()
+        self._pip_img = None
+        if self.pip_reader is not None and self.pip_src is not None \
+                and pipmod.gauge_of(self.layout_) is not None:
+            self._pip_img = self.pip_reader.frame_at(v + self.pip_src.offset)
         key = (round(v, 3), round(self.offset, 4), g, self._layout_rev, edit,
                self._hover, self.style_name, self.use_mph, self.invert_lat,
-               self.invert_lon, id(self.ctx), self._guides)
+               self.invert_lon, id(self.ctx), self._guides, id(self._pip_img))
         if key == self._ovl_key:
             return
         self._ovl_key = key
@@ -3140,7 +3485,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 "gauge_opts": self.gauge_opts,
                 "overrides": self.overrides,
                 "use_mph": self.use_mph,
-                "trim": list(self.trim) if getattr(self, "trim", None) else None}
+                "trim": list(self.trim) if getattr(self, "trim", None) else None,
+                "pip": self.pip_src.to_dict() if self.pip_src else None}
 
     def _save(self, quiet: bool = False):
         if self.video_path is None:
@@ -3551,7 +3897,8 @@ class MainWindow(QtWidgets.QMainWindow):
             g_rotate=a.get("angle"), g_flip=bool(a.get("flip", False)),
             gauge_opts=self.gauge_opts, overrides=self.overrides or None,
             cards=None if preview else self._cards_spec().to_dict(),
-            faststart=self.faststart_box.isChecked())
+            faststart=self.faststart_box.isChecked(),
+            pip=self.pip_src.to_dict() if (self.pip_src and self.pip_info) else None)
 
     def _render_preview(self):
         if not self._ready():
