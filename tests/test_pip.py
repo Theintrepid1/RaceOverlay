@@ -113,6 +113,9 @@ def test_preview_reader_gives_frames():
             assert r.frame_at(-1.0) is None and r.frame_at(99.0) is None
         finally:
             r.close()
+        # Windows can't delete a file ffmpeg still has open: close() must
+        # leave nothing running
+        assert r._proc is None and not (r._thread and r._thread.is_alive())
 
 
 def near_blue(px):

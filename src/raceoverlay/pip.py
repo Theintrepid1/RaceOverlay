@@ -166,6 +166,22 @@ def segment_inputs_and_graph(info: media.MediaInfo, src: PipSource, g: dict, box
 
 # --------------------------------------------------------------- preview --
 
+def _end(proc):
+    """Kill an ffmpeg and reap it, so it lets go of its files."""
+    if proc is None:
+        return
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        if proc.stdout:
+            proc.stdout.close()
+        proc.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 class PipReader:
     """Small frames of the PiP video for the live preview.
 
@@ -189,18 +205,20 @@ class PipReader:
         self._start = -1e9
 
     def close(self):
+        """Stop decoding and wait until ffmpeg has really exited (Windows
+        keeps the video file locked until it has)."""
         self._stop = True
         self._gen += 1
+        self._kill()
+        th = self._thread
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(timeout=5)
         self._kill()
 
     def _kill(self):
         p = self._proc
         self._proc = None
-        if p is not None:
-            try:
-                p.kill()
-            except OSError:
-                pass
+        _end(p)
 
     def frame_at(self, t: float) -> Image.Image | None:
         if t < 0 or t > self.info.duration:
@@ -265,7 +283,10 @@ class PipReader:
                 if ahead > 1.0:
                     time.sleep(0.02)
                     continue
-                buf = proc.stdout.read(size)
+                try:
+                    buf = proc.stdout.read(size)
+                except (OSError, ValueError):     # closed under us by close()
+                    break
                 if len(buf) < size:
                     break
                 im = Image.frombytes("RGB", (self.w, self.h), buf)
@@ -273,10 +294,9 @@ class PipReader:
                     if gen == self._gen:
                         self._frames.append((start_t + i / PREVIEW_FPS, im))
                 i += 1
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            _end(proc)
+            if self._proc is proc:
+                self._proc = None
             # carry on into the next chapter
             t = start_t + i / PREVIEW_FPS
             if gen != self._gen or not self.info.spans(t + 0.05, 1e9):
