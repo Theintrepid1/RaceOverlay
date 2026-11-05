@@ -145,7 +145,7 @@ PURPLE = (190, 120, 255, 255)
 
 GAUGE_TYPES = {"number": "Number", "bar": "Bar", "dial": "Dial",
                "image": "Logo", "text": "Text", "delta": "Delta bar",
-               "dash": "Dash"}
+               "dash": "Dash", "pip": "Picture-in-picture"}
 DATA_TYPES = {"number", "bar", "dial"}      # the ones that show a channel
 LIVE_TYPES = {"delta", "dash"}              # fed by lap timing / several channels
 BASE_SIZE = {("number", ""): (220, 100), ("bar", "h"): (300, 64),
@@ -178,7 +178,14 @@ GAUGE_DEFAULTS = {"type": "number", "src": "speed", "label": "",
                   "image": "", "aspect": 1.0, "opacity": 100, "text": "",
                   "range": 1.0, "green": "left", "trend": False,
                   "slots": None, "rpm_src": "rpm", "rpm_max": None,
-                  "shift_lo": None, "shift_hi": None, "pedals": True}
+                  "shift_lo": None, "shift_hi": None, "pedals": True,
+                  "crop": None, "radius": 16, "border": 3}
+
+#   Picture-in-picture box: aspect (height / width, from the second
+#   camera after cropping), crop ([left, top, right, bottom] share of the
+#   picture cut off each side), radius and border (px at 1080p), color
+#   (border), opacity. The video itself comes from the sidecar (pip.py).
+PIP_WIDTH = 480
 
 
 def logos_dir():
@@ -280,6 +287,14 @@ def normalize_gauge(g: dict) -> dict:
         out["green"] = "left"
     if out["type"] == "dash":
         out["slots"] = _norm_slots(out.get("slots"))
+    if out["type"] == "pip":
+        try:
+            c = [max(0.0, min(0.45, float(v))) for v in (out.get("crop") or [0, 0, 0, 0])][:4]
+        except (TypeError, ValueError):
+            c = []
+        out["crop"] = c + [0.0] * (4 - len(c))
+        out["radius"] = int(max(0, min(200, int(out.get("radius") or 0))))
+        out["border"] = int(max(0, min(30, int(out.get("border") or 0))))
     for f in ("rpm_max", "shift_lo", "shift_hi"):
         try:
             out[f] = None if out[f] in (None, "") else float(out[f])
@@ -360,6 +375,8 @@ def entry(layout: dict, name: str) -> dict | None:
 def base_size(g: dict) -> tuple[int, int]:
     if g["type"] == "image":
         return LOGO_WIDTH, max(1, int(round(LOGO_WIDTH * float(g.get("aspect") or 1.0))))
+    if g["type"] == "pip":
+        return PIP_WIDTH, max(1, int(round(PIP_WIDTH * float(g.get("aspect") or 0.5625))))
     if g["type"] == "text":
         f = _font(TEXT_PX, "bold")
         l, t, r, b = f.getbbox(g.get("text") or " ")
@@ -396,7 +413,7 @@ def box_label(layout: dict, name: str) -> str:
         return g.get("text") or "Text"
     if g["type"] == "image":
         return g.get("label") or "Logo"
-    if g["type"] in LIVE_TYPES:
+    if g["type"] in LIVE_TYPES or g["type"] == "pip":
         return g.get("label") or GAUGE_TYPES[g["type"]]
     return g.get("label") or g.get("src", "").replace("col:", "") or name
 
@@ -1175,6 +1192,47 @@ def draw_dash(f: Frame, box, st: Style, g: dict, v: dict):
               anchor="rs")
 
 
+def draw_pip(f: Frame, box, st: Style, g: dict, v: dict):
+    """The picture-in-picture box. v: show (bool), img (PIL image or None),
+    placeholder (bool). In an export ffmpeg puts the video in underneath
+    and only the border is drawn here; the preview passes a frame in img."""
+    if not v or not v.get("show"):
+        return
+    x, y, w, h, k = box
+    xi, yi, wi, hi = int(round(x)), int(round(y)), max(2, int(round(w))), max(2, int(round(h)))
+    rad = g.get("radius", 16) * k
+    img = v.get("img")
+    if img is not None:
+        lft, top, rgt, bot = (g.get("crop") or [0, 0, 0, 0])[:4]
+        iw, ih = img.size
+        img = img.crop((int(iw * lft), int(ih * top), int(iw * (1 - rgt)),
+                        int(ih * (1 - bot)))).resize((wi, hi), Image.BILINEAR)
+        m = _pip_mask(wi, hi, int(round(rad)))
+        op = int(g.get("opacity", 100))
+        if op < 100:
+            m = m.point(lambda a: a * op // 100)
+        tile = img.convert("RGBA")
+        tile.putalpha(m)
+        f.img.alpha_composite(tile, (max(0, xi), max(0, yi)),
+                              (max(0, -xi), max(0, -yi), wi, hi))
+    elif v.get("placeholder"):
+        f.draw.rounded_rectangle([x, y, x + w, y + h], radius=rad, fill=(20, 22, 26, 200))
+        _text(f, (x + w / 2, y + h / 2), "Second camera", _font(22 * k, st.font), st.dim,
+              st, k, anchor="mm")
+    bw = g.get("border", 3) * k
+    if bw >= 0.5:
+        col = _color(st, g.get("color", "fg"))
+        f.draw.rounded_rectangle([x + bw / 2, y + bw / 2, x + w - bw / 2, y + h - bw / 2],
+                                 radius=max(0, rad - bw / 2), outline=col,
+                                 width=max(1, int(round(bw))))
+
+
+@functools.lru_cache(maxsize=8)
+def _pip_mask(w: int, h: int, r: int):
+    from .pip import mask
+    return mask(w, h, r)
+
+
 CUSTOM_DRAW = {"number": draw_number, "bar": draw_bar, "dial": draw_dial,
                "image": draw_image, "text": draw_text_gauge, "delta": draw_delta,
-               "dash": draw_dash}
+               "dash": draw_dash, "pip": draw_pip}

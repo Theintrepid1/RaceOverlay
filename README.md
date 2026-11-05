@@ -28,6 +28,7 @@ They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox and most ot
 - **Export:**
   - The whole video or chosen laps, as one file or one per lap.
   - Trim the ends, so the paddock drive and false grid aren't in the video.
+  - Picture-in-picture: a second GoPro (driver-facing, rear) in a box, synced from its own sensors, with crop, rounded corners and a border.
   - Optional intro and end cards: title, driver and car at the start, best lap and top speed at the end.
   - Files are named like `2026-09-27 VIR S1 lap5 2'19.806.mp4`.
 - **Fast rendering:**

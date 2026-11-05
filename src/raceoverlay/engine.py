@@ -46,6 +46,7 @@ from racecore import osutil, telemetry
 
 from . import cards as cardmod
 from . import gauges, media
+from . import pip as pipmod
 from .render import OverlayContext, draw_overlay
 
 SEGMENT_SECONDS = 20.0
@@ -82,6 +83,7 @@ class Job:
     overrides: dict | None = None
     cards: dict | None = None     # raceoverlay.cards.Cards as a dict
     faststart: bool = True        # index at the front (players start sooner)
+    pip: dict | None = None       # second camera: pip.PipSource as a dict
 
     def __post_init__(self):
         self.outputs = [o if isinstance(o, Output) else Output(**o)
@@ -104,14 +106,15 @@ class Job:
             d.pop(k)
         d["out"] = asdict(out)
         stamps = []
-        for f in list(self.parts) + [self.csv]:
+        pip_parts = list((self.pip or {}).get("parts") or [])
+        for f in list(self.parts) + [self.csv] + pip_parts:
             try:
                 st = os.stat(f)
                 stamps.append([f, st.st_size, st.st_mtime_ns])
             except OSError:
                 stamps.append([f, 0, 0])
         d["stamps"] = stamps
-        d["version"] = 6
+        d["version"] = 7
         return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()
 
 
@@ -247,7 +250,28 @@ def _init_worker(job_d: dict, info_d: dict, fps: float, counter):
                                layout=job.layout, invert_lat=job.invert_lat,
                                invert_lon=job.invert_lon,
                                opts=job.gauge_opts)
-    _W.update(job=job, info=info, fps=fps, ctx=ctx, counter=counter)
+    _W.update(job=job, info=info, fps=fps, ctx=ctx, counter=counter, pip=None)
+    src = pipmod.PipSource.from_dict(job.pip)
+    pg = pipmod.gauge_of(ctx.layout)
+    if src is not None and pg is not None:
+        try:
+            pinfo = media.probe(src.parts)
+        except Exception:      # second camera's files gone: render without it
+            pinfo = None
+        if pinfo is not None:
+            ctx.pip_span = pipmod.span(pinfo, src.offset, job.offset)
+            _W["pip"] = (src, pinfo, pg)
+
+
+def _pip_mask_file(w: int, h: int, radius: int) -> str:
+    d = osutil.cache_dir() / "pip"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"mask_{w}x{h}_r{radius}.png"
+    if not p.exists():
+        tmp = p.with_suffix(f".{os.getpid()}.tmp.png")
+        pipmod.mask(w, h, radius).save(tmp)
+        os.replace(tmp, p)
+    return str(p)
 
 
 def _tiles(ctx: OverlayContext, w: int, h: int):
@@ -286,9 +310,20 @@ def _segment_cmd(seg: Segment, w: int, h: int, tiles, atlas_wh, hwdec: bool):
     else:
         graph.append(f"[p0]fps={fps}[base]")
     last = "base"
+    ai = len(spans)
+    if _W.get("pip"):
+        src, pinfo, pg = _W["pip"]
+        box = gauges.layout_boxes(_W["ctx"].layout, w, h)[pg["id"]]
+        _x, _y, bw, bh = pipmod.box_px(box)
+        mask = _pip_mask_file(bw, bh, int(round(pg.get("radius", 16) * box[4])))
+        args, steps, last = pipmod.segment_inputs_and_graph(
+            pinfo, src, pg, box, seg.start, seg.frames / fps + 1.0 / fps, fps, ai, mask,
+            dec, last)
+        cmd += args
+        graph += steps
+        ai += sum(1 for a in args if a == "-i")
     if tiles:
         aw, ah = atlas_wh
-        ai = len(spans)
         cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{aw}x{ah}",
                 "-r", f"{fps}", "-i", "pipe:0"]
         n = len(tiles)
