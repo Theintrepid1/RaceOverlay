@@ -408,7 +408,7 @@ def laptimer_state(ctx: OverlayContext, t: float) -> dict | None:
     return s
 
 
-TREND_S = 0.5      # delta bar "trend": change in delta over this long
+TREND_S = 1.0      # delta bar "trend": change in delta over this long
 
 
 def delta_state(ctx: OverlayContext, t: float) -> dict:
@@ -458,6 +458,7 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
     boxes = gauges.layout_boxes(ctx.layout, f.w, f.h)
     shown = ctx.shown()
     customs = {g["id"]: g for g in ctx.layout.get("custom", [])}
+    delta_bar_shown = any(n in customs and customs[n]["type"] == "delta" for n in shown)
     for name in shown:
         box = boxes[name]
         if name == "map":
@@ -482,6 +483,9 @@ def draw_overlay(f: gauges.Frame, ctx: OverlayContext, t: float,
             gauges.draw_gball(f, box, st, lat, lon, trail)
         elif name == "laptimer":
             s = laptimer_state(ctx, t)
+            if s is not None and delta_bar_shown:
+                # the delta bar shows the gap; don't repeat it here
+                s = dict(s, delta=None, delta_label="", bar=False)
             if s is not None:
                 gauges.draw_laptimer(f, box, st, s)
         elif name == "corner":

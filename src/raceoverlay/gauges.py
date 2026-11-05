@@ -937,6 +937,22 @@ def draw_text_gauge(f: Frame, box, st: Style, g: dict, _v=None):
 
 # ------------------------------------------------------------- delta bar --
 
+TREND_BLEND = 0.08    # s/s: gaining or losing this fast is fully green / red
+AHEAD_BLEND = 0.05    # s: this far ahead or behind is fully green / red
+
+
+def good_bad(x: float) -> tuple:
+    """Colour from red (x very negative) through yellow to green (x very
+    positive), changing smoothly around 0. Goes round the hue circle, not a
+    straight RGB mix, so the middle is a clean yellow rather than brown."""
+    import colorsys
+    s = 0.5 * (1.0 + math.tanh(x))              # 0 = red .. 1 = green
+    h0 = colorsys.rgb_to_hsv(*(c / 255 for c in BAD[:3]))
+    h1 = colorsys.rgb_to_hsv(*(c / 255 for c in GOOD[:3]))
+    hsv = [a + (b_ - a) * s for a, b_ in zip(h0, h1)]
+    return tuple(int(round(c * 255)) for c in colorsys.hsv_to_rgb(*hsv)) + (255,)
+
+
 def draw_delta(f: Frame, box, st: Style, g: dict, v: dict):
     """iRacing-style delta bar. v: delta (s or None), rate (s/s or None),
     ref (lap number or None)."""
@@ -951,11 +967,11 @@ def draw_delta(f: Frame, box, st: Style, g: dict, v: dict):
     d = v.get("delta")
     ok = d is not None and math.isfinite(d)
     if ok:
-        ahead = d < 0
-        col = GOOD if ahead else BAD
         rate = v.get("rate")
         if g.get("trend") and rate is not None and math.isfinite(rate):
-            col = GOOD if rate < 0 else BAD
+            col = good_bad(-rate / TREND_BLEND)       # catching up = green
+        else:
+            col = good_bad(-d / AHEAD_BLEND)          # ahead = green
         frac = max(-1.0, min(1.0, d / max(0.1, float(g.get("range", 1.0)))))
         if g.get("green", "left") == "right":
             frac = -frac

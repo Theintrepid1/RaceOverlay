@@ -122,3 +122,30 @@ def test_full_overlay_draws_both():
     render.draw_overlay(f, ctx, 130.0)
     a = np.asarray(f.img)[..., 3]
     assert a[650:1000, 600:1300].max() > 0       # the dash drew something
+
+
+def test_delta_colour_blends_and_lap_timer_drops_its_delta():
+    reds, greens = gauges.good_bad(-5), gauges.good_bad(5)
+    assert reds[:3] == gauges.BAD[:3] and greens[:3] == gauges.GOOD[:3]
+    mid = gauges.good_bad(0)
+    assert mid[0] > 150 and mid[1] > 150          # yellow-ish, not brown
+    # a little ahead is greener than a little behind, both in between
+    a, b = gauges.good_bad(0.3), gauges.good_bad(-0.3)
+    assert a[1] > b[1] and a[0] < b[0]
+    tel = _tel(obd=False)
+    drawn = {}
+    real = gauges.draw_laptimer
+    gauges.draw_laptimer = lambda f, box, st, s: drawn.setdefault("s", s)
+    try:
+        lay = gauges.default_layout()
+        ctx = render.OverlayContext.build(tel, layout=lay)
+        lap = [lp for lp in ctx.laps.laps if lp.timed][1]
+        render.draw_overlay(_frame(), ctx, lap.start + 30)
+        assert drawn.pop("s")["delta"] is not None
+        lay["custom"].append(gauges.normalize_gauge({"id": "d1", "type": "delta"}))
+        ctx = render.OverlayContext.build(tel, layout=lay)
+        render.draw_overlay(_frame(), ctx, lap.start + 30)
+        s = drawn.pop("s")
+        assert s["delta"] is None and not s["bar"] and s["time"] > 0
+    finally:
+        gauges.draw_laptimer = real
