@@ -22,7 +22,7 @@ They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox and most ot
 - **Gauges:**
   - Speed, g-ball, track map, lap timer with live delta, and corner entry/min speed.
   - Number, bar or dial gauges for any channel in the file, like RPM, oil temp or brake pressure.
-  - Logo and text gauges.
+  - An iRacing-style delta bar, a race-dash cluster (shift lights, gear, four channels of your choice, pedal bars), and logo and text gauges.
   - Gauges can be dragged and resized, and there are four styles.
   - A gauge whose channel isn't in the file just hides, so one layout works for every logger.
 - **Export:**

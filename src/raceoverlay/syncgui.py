@@ -612,8 +612,9 @@ class GaugeDialog(QtWidgets.QDialog):
 
         self.type_cb = QtWidgets.QComboBox()
         for k, v in gauges.GAUGE_TYPES.items():
-            self.type_cb.addItem(v, k)
-        self.type_cb.setCurrentIndex(self.type_cb.findData(self.g["type"]))
+            if k in gauges.DATA_TYPES:
+                self.type_cb.addItem(v, k)
+        self.type_cb.setCurrentIndex(max(0, self.type_cb.findData(self.g["type"])))
         form.addRow("Type", self.type_cb)
 
         self.src_cb = QtWidgets.QComboBox()
@@ -833,6 +834,194 @@ class GaugeDialog(QtWidgets.QDialog):
                                          pen=pg.mkPen(col, style=QtCore.Qt.DashLine))
                     self.plot.addItem(ln)
                     self.lines.append(ln)
+
+
+def channel_combo(tel, current: str, allow_none: bool = False,
+                  roles=("speed", "throttle", "brake", "rpm", "lap", "lat_g", "lon_g")):
+    """A combo of the file's channels (roles first, then every column);
+    ones without data are greyed out. data() is "role" or "col:<name>"."""
+    cb = QtWidgets.QComboBox()
+    cb.setMaxVisibleItems(25)
+    model = cb.model()
+    if allow_none:
+        cb.addItem("(empty)", "")
+    for r in roles:
+        col = tel.mapping.get(r) if tel is not None else None
+        cb.addItem(telemetry.ROLE_LABELS[r] + (f"  (from {col})" if col else ""), r)
+        if tel is None or not tel.has(r):
+            model.item(cb.count() - 1).setEnabled(False)
+    if tel is not None:
+        cb.insertSeparator(cb.count())
+        for c in tel.source_columns:
+            u = tel.units.get(c, "")
+            live = tel.has("col:" + c)
+            cb.addItem(c + (f"  [{u}]" if u else "") + ("" if live else "  (constant)"),
+                       "col:" + c)
+            if not live:
+                model.item(cb.count() - 1).setEnabled(False)
+    i = cb.findData(current)
+    if i < 0 and current:
+        cb.addItem(f"{src_label(tel, current) if tel else current}  (not in this file)",
+                   current)
+        i = cb.count() - 1
+    cb.setCurrentIndex(max(0, i))
+    return cb
+
+
+class DeltaDialog(QtWidgets.QDialog):
+    """Delta bar: how big a gap fills the bar, which way green goes, and
+    whether colour follows ahead/behind or gaining/losing."""
+
+    RANGES = (0.5, 1.0, 2.0, 5.0)
+
+    def __init__(self, parent, g: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Delta bar")
+        self.g = dict(g)
+        lay = QtWidgets.QVBoxLayout(self)
+        form = QtWidgets.QFormLayout()
+        lay.addLayout(form)
+        self.range_cb = QtWidgets.QComboBox()
+        for r in self.RANGES:
+            self.range_cb.addItem(f"± {r:g} s", r)
+        i = self.range_cb.findData(float(g.get("range", 1.0)))
+        if i < 0:
+            self.range_cb.addItem(f"± {g['range']:g} s", float(g["range"]))
+            i = self.range_cb.count() - 1
+        self.range_cb.setCurrentIndex(i)
+        form.addRow("Full bar at", self.range_cb)
+        self.green_cb = QtWidgets.QComboBox()
+        self.green_cb.addItem("Left (like a number line: ahead is minus)", "left")
+        self.green_cb.addItem("Right", "right")
+        self.green_cb.setCurrentIndex(max(0, self.green_cb.findData(g.get("green", "left"))))
+        form.addRow("Ahead fills toward", self.green_cb)
+        self.trend = QtWidgets.QCheckBox("Color by gaining / losing right now")
+        self.trend.setToolTip("Off: green when ahead, red when behind. On: green while "
+                              "you're catching the reference lap (the gap is shrinking), "
+                              "red while it's pulling away, wherever the bar is.")
+        self.trend.setChecked(bool(g.get("trend")))
+        form.addRow("", self.trend)
+        lay.addWidget(_note("Compares against the same lap as the lap timer (Look tab → "
+                            "Lap timer: best lap so far, or the session's best). Shows "
+                            "nothing on out-laps.", small=True))
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(460, 0)
+
+    def result_gauge(self) -> dict:
+        g = dict(self.g)
+        g.update(range=self.range_cb.currentData(), green=self.green_cb.currentData(),
+                 trend=self.trend.isChecked())
+        return gauges.normalize_gauge(g)
+
+
+class DashDialog(QtWidgets.QDialog):
+    """Dash: four channel slots, the RPM channel and shift lights, pedal
+    bars and a footer line."""
+
+    def __init__(self, parent, ctx, g: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Dash")
+        self.ctx = ctx
+        self.tel = ctx.telem if ctx is not None else None
+        self.g = gauges.normalize_gauge(dict(g, type="dash"))
+        lay = QtWidgets.QVBoxLayout(self)
+        sbox, sl = _group("Slots (left side, 2 × 2)")
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(_note("Channel", small=True), 0, 1)
+        grid.addWidget(_note("Label", small=True), 0, 2)
+        grid.addWidget(_note("Convert", small=True), 0, 3)
+        self.slot_rows = []
+        for i, slot in enumerate(self.g["slots"]):
+            cb = channel_combo(self.tel, slot["src"], allow_none=True)
+            le = QtWidgets.QLineEdit(slot["label"])
+            le.setPlaceholderText("auto")
+            le.setMaxLength(10)
+            cv = QtWidgets.QComboBox()
+            grid.addWidget(QtWidgets.QLabel(("Top left", "Top right", "Bottom left",
+                                             "Bottom right")[i]), i + 1, 0)
+            grid.addWidget(cb, i + 1, 1)
+            grid.addWidget(le, i + 1, 2)
+            grid.addWidget(cv, i + 1, 3)
+            row = (cb, le, cv)
+            self.slot_rows.append(row)
+            self._fill_conv(row, slot["conv"])
+            cb.currentIndexChanged.connect(lambda _i, r=row: self._fill_conv(r, ""))
+        grid.setColumnStretch(1, 1)
+        sl.addLayout(grid)
+        lay.addWidget(sbox)
+
+        rbox, rl = _group("RPM and shift lights")
+        form = QtWidgets.QFormLayout()
+        rl.addLayout(form)
+        self.rpm_cb = channel_combo(self.tel, self.g.get("rpm_src") or "rpm",
+                                    roles=("rpm",))
+        form.addRow("RPM channel", self.rpm_cb)
+        auto = ctx.dash_rpm_limits(self.g) if ctx is not None else (None, None, None)
+
+        def num(v, a):
+            e = QtWidgets.QLineEdit("" if v is None else f"{v:g}")
+            e.setValidator(QtGui.QDoubleValidator(0, 30000, 0))
+            e.setPlaceholderText(f"auto ({a:g})" if a else "auto")
+            return e
+        self.max_ed = num(self.g.get("rpm_max"), auto[0])
+        self.lo_ed = num(self.g.get("shift_lo"), auto[1])
+        self.hi_ed = num(self.g.get("shift_hi"), auto[2])
+        form.addRow("RPM scale to", self.max_ed)
+        form.addRow("First light at", self.lo_ed)
+        form.addRow("All lit (flash) at", self.hi_ed)
+        rl.addWidget(_note("Gear is worked out from RPM against speed. Without RPM the "
+                           "middle shows speed instead.", small=True))
+        lay.addWidget(rbox)
+
+        obox, ol = _group("Other")
+        oform = QtWidgets.QFormLayout()
+        ol.addLayout(oform)
+        self.pedals = QtWidgets.QCheckBox("Brake and throttle bars")
+        self.pedals.setChecked(bool(self.g.get("pedals", True)))
+        oform.addRow("", self.pedals)
+        self.text_ed = QtWidgets.QLineEdit(self.g.get("text", ""))
+        self.text_ed.setPlaceholderText("e.g. car or team name")
+        oform.addRow("Footer text", self.text_ed)
+        lay.addWidget(obox)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.resize(620, 0)
+
+    def _fill_conv(self, row, want: str):
+        cb, _le, cv = row
+        cv.clear()
+        cv.addItem("None", "")
+        src = cb.currentData() or ""
+        if src.startswith("col:") and self.tel is not None:
+            for k in gauges.conversions_for(self.tel.units.get(src[4:], "")):
+                cv.addItem(gauges.CONVERSIONS[k][0], k)
+        cv.setCurrentIndex(max(0, cv.findData(want)))
+        cv.setEnabled(cv.count() > 1)
+
+    @staticmethod
+    def _num(e):
+        try:
+            return float(e.text()) if e.text().strip() else None
+        except ValueError:
+            return None
+
+    def result_gauge(self) -> dict:
+        g = dict(self.g)
+        g.update(slots=[{"src": cb.currentData() or "", "label": le.text().strip(),
+                         "conv": cv.currentData() or "", "decimals": -1}
+                        for cb, le, cv in self.slot_rows],
+                 rpm_src=self.rpm_cb.currentData() or "rpm",
+                 rpm_max=self._num(self.max_ed), shift_lo=self._num(self.lo_ed),
+                 shift_hi=self._num(self.hi_ed), pedals=self.pedals.isChecked(),
+                 text=self.text_ed.text().strip())
+        return gauges.normalize_gauge(g)
 
 
 def import_logo(path: str) -> tuple[str, float]:
@@ -1588,6 +1777,8 @@ class MainWindow(QtWidgets.QMainWindow):
         crow = QtWidgets.QGridLayout()
         for i, (text, slot) in enumerate((("Add data gauge…", self._add_gauge),
                                           ("Edit…", self._edit_gauge),
+                                          ("Add delta bar…", lambda: self._add_live("delta")),
+                                          ("Add dash…", lambda: self._add_live("dash")),
                                           ("Add logo…", lambda: self._add_simple("image")),
                                           ("Add text…", lambda: self._add_simple("text")),
                                           ("Copy", self._dup_gauge),
@@ -2320,10 +2511,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 name = g.get("label") or src_label(self.telem, g["src"])
             else:
                 name = gauges.box_label(self.layout_, g["id"])
-            text = f"{name}  ·  {gauges.GAUGE_TYPES[g['type']]}"
+            text = (name if g["type"] in gauges.LIVE_TYPES and name == gauges.GAUGE_TYPES[g["type"]]
+                    else f"{name}  ·  {gauges.GAUGE_TYPES[g['type']]}")
             ok = self.ctx is None or self.ctx.gauge_available(g)
             if not ok:
-                text += ("   (picture missing)" if g["type"] == "image" else "   (no data)")
+                text += ("   (picture missing)" if g["type"] == "image" else
+                         "   (no laps)" if g["type"] == "delta" else "   (no data)")
             it = QtWidgets.QListWidgetItem(text)
             it.setData(QtCore.Qt.UserRole, g["id"])
             it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
@@ -2332,6 +2525,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setForeground(QtGui.QBrush(QtGui.QColor(140, 140, 140)))
                 it.setToolTip("The picture isn't on this computer: Edit… and choose it "
                               "again." if g["type"] == "image" else
+                              "No timed laps in this file, so there's no delta."
+                              if g["type"] == "delta" else
                               f"'{src_label(self.telem, g['src'])}' isn't in "
                               "this file, so this gauge is skipped.")
             self.custom_list.addItem(it)
@@ -2383,8 +2578,36 @@ class MainWindow(QtWidgets.QMainWindow):
             self._fill_custom_list()
             self.custom_list.setCurrentRow(self.custom_list.count() - 1)
 
+    def _live_dialog(self, g: dict):
+        return DeltaDialog(self, g) if g["type"] == "delta" else DashDialog(self, self.ctx, g)
+
+    def _add_live(self, kind: str):
+        if kind == "dash" and not self._need_data():
+            return
+        # delta bar: centred under the lap timer; dash: bottom centre
+        w = gauges.BASE_SIZE[(kind, "")][0] / 1920
+        g = gauges.normalize_gauge(dict(id=gauges.new_gauge_id(self.layout_), type=kind,
+                                        x=round((1 - w) / 2, 3),
+                                        y=0.335 if kind == "delta" else 0.655,
+                                        slots=gauges.default_slots()))
+        dlg = self._live_dialog(g)
+        if dlg.exec():
+            self.layout_["custom"].append(dlg.result_gauge())
+            self._layout_changed()
+            self._fill_custom_list()
+            self.custom_list.setCurrentRow(self.custom_list.count() - 1)
+
     def _edit_gauge(self):
         g = self._selected_gauge()
+        if g is not None and g["type"] in gauges.LIVE_TYPES:
+            dlg = self._live_dialog(g)
+            if dlg.exec():
+                g.update(dlg.result_gauge())
+                if self.ctx:
+                    self.ctx._range_cache.clear()
+                self._layout_changed()
+                self._fill_custom_list()
+            return
         if g is not None and g["type"] not in gauges.DATA_TYPES:
             dlg = SimpleGaugeDialog(self, g)
             if dlg.exec():
