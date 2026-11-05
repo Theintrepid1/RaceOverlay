@@ -1592,14 +1592,27 @@ class MainWindow(QtWidgets.QMainWindow):
         l2.addLayout(crow)
         pv.addWidget(box2)
 
-        box3, l3 = _group("Second camera (picture-in-picture)")
+        # second camera: tucked behind one button until it's wanted
+        self.pip_btn = QtWidgets.QToolButton()
+        self.pip_btn.setText("Second camera (picture-in-picture)")
+        self.pip_btn.setCheckable(True)
+        self.pip_btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.pip_btn.setArrowType(QtCore.Qt.RightArrow)
+        self.pip_btn.setAutoRaise(True)
+        self.pip_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pip_btn.setToolTip("Show a second GoPro (driver-facing, rear...) in a box "
+                                "on the video")
+        self.pip_btn.toggled.connect(self._pip_toggled)
+        pv.addWidget(self.pip_btn)
+        self.pip_panel = QtWidgets.QWidget()
+        l3 = QtWidgets.QVBoxLayout(self.pip_panel)
+        l3.setContentsMargins(18, 0, 0, 4)
         prow = QtWidgets.QHBoxLayout()
         self.pip_lbl = _note("<i>none</i>")
         self.pip_lbl.setWordWrap(True)
         prow.addWidget(self.pip_lbl, 1)
         prow.addWidget(_btn("Open…", self._choose_pip,
-                            "A second GoPro recording (driver-facing, rear...) to show "
-                            "in a box on the video"))
+                            "A second GoPro recording to show in a box on the video"))
         self.btn_pip_remove = _btn("Remove", self._remove_pip)
         prow.addWidget(self.btn_pip_remove)
         l3.addLayout(prow)
@@ -1607,14 +1620,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                 "Match its accelerometer to the data file, the same way "
                                 "as the main camera (sync the main camera first)")
         l3.addWidget(self.btn_pipsync)
-        nrow = QtWidgets.QHBoxLayout()
-        nrow.addWidget(_note("Shift it"))
-        for lbl, d, tip in (("-1s", -1.0, "Show its footage from 1 s earlier"),
-                            ("-0.1s", -0.1, ""), ("-1 frame", "-f", ""),
-                            ("+1 frame", "+f", ""), ("+0.1s", 0.1, ""),
-                            ("+1s", 1.0, "Show its footage from 1 s later")):
-            nrow.addWidget(_btn(lbl, lambda _=False, d=d: self._pip_nudge(d), tip))
-        l3.addLayout(nrow)
+        ngrid = QtWidgets.QGridLayout()
+        ngrid.addWidget(_note("Earlier"), 0, 0)
+        ngrid.addWidget(_note("Later"), 1, 0)
+        for i, (lbl, d) in enumerate((("1s", 1.0), ("0.1s", 0.1), ("1 frame", "f"))):
+            ngrid.addWidget(_btn(f"- {lbl}", lambda _=False, d=d: self._pip_nudge(d, -1),
+                                 "Show its footage from earlier"), 0, 1 + i)
+            ngrid.addWidget(_btn(f"+ {lbl}", lambda _=False, d=d: self._pip_nudge(d, +1),
+                                 "Show its footage from later"), 1, 1 + i)
+        l3.addLayout(ngrid)
         self.pip_offset_spin = QtWidgets.QDoubleSpinBox()
         self.pip_offset_spin.setRange(-100000.0, 100000.0)
         self.pip_offset_spin.setDecimals(3)
@@ -1627,10 +1641,13 @@ class MainWindow(QtWidgets.QMainWindow):
         orow2.addWidget(_note("Offset"))
         orow2.addWidget(self.pip_offset_spin, 1)
         l3.addLayout(orow2)
-        l3.addWidget(_note("Its box moves, resizes and snaps like a gauge (Look tab → "
-                           "Move && resize gauges); Edit… it in the gauge list for crop, "
-                           "corners and border.", small=True))
-        pv.addWidget(box3)
+        l3.addWidget(_note("Its box moves, resizes and snaps like a gauge; Edit… it in "
+                           "the Look tab's gauge list for crop, corners and border.",
+                           small=True))
+        self.pip_panel.setVisible(False)
+        for wdg in (self.btn_pip_remove, self.btn_pipsync, self.pip_offset_spin):
+            wdg.setEnabled(False)            # until there's a second camera
+        pv.addWidget(self.pip_panel)
 
         self.status = _note("")
         pv.addWidget(self.status)
@@ -3278,6 +3295,10 @@ class MainWindow(QtWidgets.QMainWindow):
             sync = " · synced" if src.synced else " · <b>not synced yet</b>"
             self.pip_lbl.setText(name + more + state + (sync if self.pip_info else ""))
             self.pip_lbl.setToolTip("\n".join(src.parts))
+        self.pip_btn.setText("Second camera (picture-in-picture)" if src is None else
+                             f"Second camera  (on: {Path(src.parts[0]).name})")
+        if src is not None and not self.pip_btn.isChecked():
+            self.pip_btn.setChecked(True)
         on = src is not None and self.pip_info is not None
         for wdg in (self.btn_pip_remove,):
             wdg.setEnabled(src is not None)
@@ -3357,13 +3378,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_pip_ctx()
         self._save(quiet=True)
 
-    def _pip_nudge(self, d):
+    def _pip_nudge(self, d, sign: int):
         if self.pip_src is None:
             return
-        if d in ("-f", "+f"):
-            fps = self.pip_info.fps if self.pip_info else 30.0
-            d = (-1 if d == "-f" else 1) / fps
-        self._set_pip_offset(self.pip_src.offset + d)
+        if d == "f":
+            d = 1.0 / (self.pip_info.fps if self.pip_info else 30.0)
+        self._set_pip_offset(self.pip_src.offset + sign * d)
+
+    def _pip_toggled(self, on: bool):
+        self.pip_panel.setVisible(on)
+        self.pip_btn.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
 
     def _pip_auto_sync(self):
         if self.pip_src is None or self.pip_info is None or self._pipsync_busy:
