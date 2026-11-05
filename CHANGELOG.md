@@ -1,5 +1,11 @@
 # Changelog
 
+v1.4.0
+- **Delta bar:** an iRacing-style bar with the gap in the middle, blending red to green. Range, direction and gaining/losing colouring are adjustable. The lap timer drops its own delta while a bar is shown.
+- **Dash cluster:** shift lights, an RPM bar graph, gear (worked out from RPM and speed), four channels of your choice, brake/throttle bars and a footer line. With no RPM it shows speed instead.
+- **Snapping:** gauges snap to the middle, the edges and the corners while you drag them (hold Shift to place freely).
+- **Picture-in-picture:** a second GoPro in a box on the video, synced from its own sensors, with crop, rounded corners, a border and opacity. It's off until you open a second camera.
+
 v1.3.0
 - **Trim ends:** cut the start and end of a whole-video export.
 - **Readable file names:** date, track, session, lap and lap time.

@@ -1,17 +1,22 @@
 # Roadmap
 
-## Next — planned (see the project's change list, batch F)
-- GoPro GPS clock: verified on a real HERO6 clip (reset clock, weak 2D fix).
-  Using GoPro GPS positions for laps or sync needs an outdoor clip with a
-  solid 3D lock first.
-- Day tab: compare many sessions (consecutive / baseline) across several days
+## Next — planned
+- CMP official turn names (placed from the track map's distance table)
+- Day tab across several days (F2): decide after using multi-session compare
+- Check against real data: the dash with an APEX OBD dongle log, picture-in-picture
+  with two real GoPro recordings, the import clock fix on a reset-clock card
 
 ## Next — collecting ideas, not started
-- Interpolate the start/finish crossing (laps start up to one sample late)
+- GoPro GPS positions for laps or sync (needs an outdoor clip with a solid 3D lock)
+- Picture-in-picture sync for non-GoPro cameras (audio match)
 - Track database stage 2: public tracks repo + "Check for track updates"
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **v1.4.0** (2026-11-05):
+  - **Delta bar** (iRacing-style), **dash cluster** gauge, and **snapping** while
+    moving gauges.
+  - **Picture-in-picture:** a second GoPro in a box, synced from its own sensors.
 - **v1.3.0** (2026-11-02):
   - **Whole-video export:** trim the ends (under "Trim ends").
   - **File names** like `2026-09-27 VIR S1 lap5 2'19.806.mp4`.
@@ -21,6 +26,8 @@
     - Every finishing step is named, with a running time.
     - Faststart is optional.
   - **GoPro GPS clock:** checked against a real HERO6 clip.
+  - **Lap times interpolated** to the line crossing; **Day tab** compares any number
+    of sessions; **CMP Full Course** in the track library.
 - **v1.2.0** (2026-10-31):
   - **Race Analysis:**
     - APEX exports recognized in all three naming styles, with short session names.
