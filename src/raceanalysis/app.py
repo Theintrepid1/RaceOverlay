@@ -89,6 +89,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._tick)
         self.timer.start(50)
 
+    def check_updates(self):
+        from raceoverlay.updater_gui import UpdateDialog
+        UpdateDialog(self, "analysis").exec()
+
     # ================================================================ UI ===
     def _build(self):
         mb = self.menuBar()
@@ -126,6 +130,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             # this window only (not dialogs); pop-outs get the same actions
             act.setShortcutContext(QtCore.Qt.WindowShortcut)
             self.video_actions.append(act)
+        hm = mb.addMenu("&Help")
+        hm.addAction("Check for updates…", self.check_updates)
 
         central = QtWidgets.QWidget()
         cl = QtWidgets.QVBoxLayout(central)
@@ -932,6 +938,16 @@ def main(argv: list[str] | None = None) -> int:
     win = AnalysisWindow()
     win.show()
     win.restore_popouts()
+    try:   # AppImage: in the menu as Race Overlay only (e.g. Shelly)? add Race Analysis
+        from raceoverlay.menuentry import ensure_analysis_entry
+        ensure_analysis_entry()
+    except Exception:  # noqa: BLE001 - cosmetic
+        pass
+
+    def daily_check():
+        from raceoverlay.updater_gui import auto_check
+        auto_check(win, "analysis")
+    QtCore.QTimer.singleShot(5000, daily_check)
     for p in args.csv:
         if os.path.exists(p):
             win.add_session(p)

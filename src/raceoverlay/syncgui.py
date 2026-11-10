@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
+from racecore import update
 from racecore import gosync, osutil, telemetry  # noqa: E402
 
 from . import pip as pipmod
@@ -217,67 +218,8 @@ def engine_args(job_file: str) -> list[str]:
 
 # ------------------------------------------------- app menu (AppImage only) --
 
-def appimage_path() -> str | None:
-    p = os.environ.get("APPIMAGE")
-    return p if p and os.path.exists(p) else None
-
-
-def _desktop_file(name: str = "raceoverlay") -> Path:
-    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-    return base / "applications" / f"{name}.desktop"
-
-
-def menu_entry_target() -> str | None:
-    """The AppImage path the app-menu entry launches, or None if none."""
-    f = _desktop_file()
-    if not f.exists():
-        return None
-    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("Exec="):
-            return line[5:].rsplit(" %", 1)[0].strip().strip('"')
-    return None
-
-
-def add_menu_entry(appimage: str):
-    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-    icon_dir = base / "icons" / "hicolor" / "scalable" / "apps"
-    icon_dir.mkdir(parents=True, exist_ok=True)
-    for src_name, name in (("icon.svg", "raceoverlay"), ("icon_analysis.svg", "raceanalysis")):
-        src_icon = Path(__file__).with_name(src_name)
-        if src_icon.exists():
-            shutil.copyfile(src_icon, icon_dir / f"{name}.svg")
-    f = _desktop_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(
-        "[Desktop Entry]\nType=Application\nName=Race Overlay\n"
-        "GenericName=Telemetry Video Overlay\n"
-        "Comment=Sync racing telemetry to video and render gauge overlays\n"
-        f'Exec="{appimage}" %f\nIcon=raceoverlay\nTerminal=false\n'
-        "Categories=AudioVideo;Video;\n"
-        "MimeType=video/mp4;video/quicktime;video/x-matroska;\n"
-        "StartupWMClass=raceoverlay\n", encoding="utf-8")
-    _desktop_file("raceanalysis").write_text(
-        "[Desktop Entry]\nType=Application\nName=Race Analysis\n"
-        "GenericName=Lap Analysis\n"
-        "Comment=Compare laps and sessions and find where the time goes\n"
-        f'Exec="{appimage}" --analysis %F\nIcon=raceanalysis\nTerminal=false\n'
-        "Categories=AudioVideo;Video;\nMimeType=text/csv;\n"
-        "StartupWMClass=raceanalysis\n", encoding="utf-8")
-    for cmd in (["update-desktop-database", str(f.parent)],
-                ["gtk-update-icon-cache", "-q", str(base / "icons" / "hicolor")]):
-        try:
-            import subprocess
-            subprocess.run(cmd, capture_output=True, timeout=10)
-        except Exception:
-            pass
-
-
-def remove_menu_entry():
-    for name in ("raceoverlay", "raceanalysis"):
-        try:
-            _desktop_file(name).unlink()
-        except OSError:
-            pass
+from .menuentry import (add_menu_entry, appimage_path,  # noqa: E402
+                        ensure_analysis_entry, menu_entry_target, remove_menu_entry)
 
 
 def fmt_t(t: float) -> str:
@@ -2122,6 +2064,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.adv_widget.setVisible(self.adv_box.isChecked())
         pv.addWidget(vbox)
 
+        ubox, ul = _group("Updates")
+        urow = QtWidgets.QHBoxLayout()
+        urow.addWidget(_note(f"Version {__version__}"), 1)
+        urow.addWidget(_btn("Check for updates…", self._check_updates,
+                            "Look for a new version on GitHub; install it, or roll back "
+                            "to the version you had before"))
+        ul.addLayout(urow)
+        self.auto_update_box = _check("Check once a day", update.auto_enabled(),
+                                      lambda on: update.save_state(auto=bool(on)))
+        ul.addWidget(self.auto_update_box)
+        pv.addWidget(ubox)
+
         abox, al2 = _group("About")
         al2.addWidget(_note(f"Race Overlay {__version__}<br>"
                             "Free software under the GNU GPL v3 or later. "
@@ -2901,6 +2855,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._opt("bg_opacity", -1)
         self._sync_bg_widgets()
 
+    def _check_updates(self):
+        from .updater_gui import UpdateDialog
+        UpdateDialog(self, "overlay").exec()
+        self.auto_update_box.setChecked(update.auto_enabled())
+
     # ----- app menu -----
 
     def _menu_refresh(self):
@@ -2935,9 +2894,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if tgt:
             if os.path.abspath(tgt) != os.path.abspath(p) and not os.path.exists(tgt):
                 add_menu_entry(p)  # the old copy is gone: follow the move
-            elif not _desktop_file("raceanalysis").exists() and \
-                    os.path.abspath(tgt) == os.path.abspath(p):
-                add_menu_entry(p)  # menu entry from before Race Analysis existed
+            else:
+                # in the menu as Race Overlay (by us or an app manager such as
+                # Shelly): add Race Analysis if it's missing, leave the rest
+                ensure_analysis_entry(p)
             return
         s = settings()
         if s.value("integration/asked", False, type=bool):
@@ -4152,6 +4112,11 @@ def main(argv: list[str] | None = None) -> int:
     win = MainWindow()
     win.show()
     QtCore.QTimer.singleShot(400, win.offer_menu_entry)
+
+    def daily_check():
+        from .updater_gui import auto_check
+        auto_check(win, "overlay")
+    QtCore.QTimer.singleShot(5000, daily_check)
 
     def started_ok():  # the system mpv got us to a working window
         guard = os.environ.pop("RACEOVERLAY_MPV_GUARD", None)
