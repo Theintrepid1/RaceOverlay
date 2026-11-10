@@ -1,26 +1,30 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Theintrepid1 and Race Overlay contributors
-"""Tie a whole event folder together: data files, front and rear cameras.
+"""Tie a whole event folder together: data files and their videos.
 
-For folders organised by hand (one folder per session, raw GoPro clips from
-two cameras, the data file, an overlaid export...), not ones made by the
-SD-card import.
+For folders organised by hand (one folder per session, raw GoPro clips, the
+data file, an overlaid export...), not ones made by the SD-card import.
 
     scan(folder)      every data file and video in the tree, duplicates and
                       non-telemetry files dropped
     match(scan)       each GoPro recording synced to the data file it fits
-                      (from its motion sensors), grouped into sessions with
-                      a front and a rear camera
-    apply(sessions)   save the pairings next to the front videos (the rear
-                      camera as Race Overlay's picture-in-picture) and name
-                      the sessions after their folders
+                      (from its motion sensors), grouped into sessions
+    apply(sessions)   save the pairings next to the videos and name the
+                      sessions after their folders
 
-Front or rear: syncing a camera also works out how it's mounted, so the two
-cameras in a car come out about 180 degrees apart. Every clip in the event
-is put in one of two "facing" groups that way. Which group is the front
-can't be told from the sensors alone (that needs the camera's axis layout),
-so names decide ("front", "rear", "back"...), else a guess the user can
-swap for the whole event at once.
+One camera is the usual case: a session's video is its best-matching
+recording. A recording that runs AT THE SAME TIME as that one is a second
+camera (Race Overlay's picture-in-picture); recordings one after another
+are the same camera stopped and started (in the pits, say), and only the
+best of those is used, since a session has one video.
+
+With two cameras, which is the main video: syncing a camera also works out
+how it's mounted, so a camera looking back sees the car's forward the
+opposite way to one looking forward. Every clip in the event goes in one of
+two "facing" groups that way, and names decide which group is the front
+("front", "rear", "back"...), else a guess the user can swap for the whole
+event at once. A second camera can also be added to a session by hand
+(add_second).
 """
 from __future__ import annotations
 
@@ -61,15 +65,21 @@ class Clip:
     offset: float                   # data time = video time + offset
     score: float
     forward: tuple                  # the car's forward in this camera's axes (unit)
+    duration: float = 0.0           # seconds of video
     facing: str = "A"               # "A" or "B": which way it points (see module doc)
+
+    @property
+    def span(self) -> tuple[float, float]:
+        """Data-file time the recording covers."""
+        return self.offset, self.offset + self.duration
 
 
 @dataclass
 class Session:
     data: DataFile
     title: str
-    front: Clip | None = None
-    rear: Clip | None = None
+    main: Clip | None = None        # the session's video
+    second: Clip | None = None      # a second camera running at the same time
     extra: list = field(default_factory=list)    # more recordings that also fit
     use: bool = True
 
@@ -212,7 +222,8 @@ def match(sc: Scan, progress=None, cancelled=None, read=None) -> list[Session]:
         d, res = best
         _car, info = gosync.to_car_frame(t, h, d.tel, res.offset)
         fwd = gosync.car_forward(a, info)
-        clips.append(Clip(v, d, res.offset, res.score, tuple(float(x) for x in fwd)))
+        clips.append(Clip(v, d, res.offset, res.score, tuple(float(x) for x in fwd),
+                          float(t[-1] - t[0]) if len(t) > 1 else 0.0))
     _facings(clips)
     return sessions_from(sc, clips)
 
@@ -255,37 +266,75 @@ def _title(sc: Scan, d: DataFile, clips: list[Clip]) -> str:
     return meta.get("session_notes") or Path(d.path).stem
 
 
+def overlap(a: Clip, b: Clip) -> float:
+    """Share of the shorter recording that runs at the same time as the
+    other (0 = one after the other, 1 = fully at the same time)."""
+    (a0, a1), (b0, b1) = a.span, b.span
+    both = min(a1, b1) - max(a0, b0)
+    short = min(a1 - a0, b1 - b0)
+    return max(0.0, both) / short if short > 0 else 0.0
+
+
+SAME_TIME = 0.5     # this much overlap: two cameras, not one stopped and started
+
+
 def sessions_from(sc: Scan, clips: list[Clip], swap: bool = False) -> list[Session]:
-    """Sessions from synced clips: per data file, the best-matching clip
-    facing front and the best facing rear (swap: the other way round)."""
+    """Sessions from synced clips. Per data file: the session's video is the
+    best-matching clip, from the front-facing group when there's a choice
+    (swap: the other group); a clip running at the same time as it, best
+    one facing the other way, is the second camera; anything else (the same
+    camera stopped and started, copies) is extra."""
     front_group = "B" if swap else "A"
     out = []
     for d in sc.data:
         mine = sorted((c for c in clips if c.data is d), key=lambda c: -c.score)
         s = Session(d, _title(sc, d, mine))
-        for c in mine:
-            if c.facing == front_group and s.front is None:
-                s.front = c
-            elif c.facing != front_group and s.rear is None:
-                s.rear = c
+        if mine:
+            # main video: the best clip that has a partner running at the same
+            # time facing front; with no partner, simply the best clip
+            def partners(c):
+                return [o for o in mine if o is not c and overlap(c, o) >= SAME_TIME]
+            pairs = [c for c in mine if partners(c)]
+            if pairs:
+                fronts = [c for c in pairs if c.facing == front_group] or pairs
+                s.main = fronts[0]
+                p = partners(s.main)
+                s.second = next((o for o in p if o.facing != s.main.facing), p[0])
             else:
-                s.extra.append(c)
-        if s.front is None and s.rear is not None:      # one camera: it's the video
-            s.front, s.rear = s.rear, None
+                s.main = mine[0]
+            s.extra = [c for c in mine if c is not s.main and c is not s.second]
         out.append(s)
     return out
 
 
 def swap_all(sessions: list[Session]):
-    """Front <-> rear for every session (the facing guess was wrong)."""
+    """Main video <-> second camera for every session that has both."""
     for s in sessions:
-        if s.rear is not None:
-            s.front, s.rear = s.rear, s.front
+        if s.second is not None:
+            s.main, s.second = s.second, s.main
+
+
+def add_second(s: Session, parts: list, read=None) -> Clip:
+    """Sync a video picked by hand to session s's data file and make it the
+    second camera. Raises ValueError when its sensors don't match."""
+    from . import gosync
+    t, a = read(parts) if read else gosync.read_accel(_parts_with_starts(parts))
+    h = gosync.camera_horizontal(a)
+    res = gosync.find_offset(t, h, s.data.tel)
+    if not res.confident:
+        raise ValueError(f"its motion doesn't match this session's data well enough "
+                         f"({res.score:.0%})")
+    _car, info = gosync.to_car_frame(t, h, s.data.tel, res.offset)
+    fwd = gosync.car_forward(a, info)
+    c = Clip(Video(list(parts), True), s.data, res.offset, res.score,
+             tuple(float(x) for x in fwd), float(t[-1] - t[0]) if len(t) > 1 else 0.0)
+    s.second = c
+    return c
 
 
 def apply(sessions: list[Session]) -> list[tuple[str, list, float]]:
-    """Save each used session: the front video's sidecar points at the data
-    file (and holds the rear camera as picture-in-picture), and the data
+    """Save each used session: its video's sidecar points at the data file
+    (and holds any second camera as picture-in-picture), and the data
     file's notes get the session's name. Returns (data file, video parts,
     offset) for Race Analysis to open."""
     import json
@@ -301,20 +350,20 @@ def apply(sessions: list[Session]) -> list[tuple[str, list, float]]:
                 n.save(s.data.path)
         except OSError:
             pass
-        if s.front is None:
+        if s.main is None:
             out.append((s.data.path, [], 0.0))
             continue
-        fp = s.front.video.parts
-        sc = ingest.save_pairing(fp, s.data.path, s.front.offset)
+        fp = s.main.video.parts
+        sc = ingest.save_pairing(fp, s.data.path, s.main.offset)
         if sc is not None:
             try:
                 data = json.loads(sc.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 data = {}
-            if s.rear is not None:
-                # second camera time = main video time + (front offset - rear offset)
-                data["pip"] = {"parts": [str(Path(p).resolve()) for p in s.rear.video.parts],
-                               "offset": round(s.front.offset - s.rear.offset, 4),
+            if s.second is not None:
+                # second camera time = main video time + (main offset - its offset)
+                data["pip"] = {"parts": [str(Path(p).resolve()) for p in s.second.video.parts],
+                               "offset": round(s.main.offset - s.second.offset, 4),
                                "synced": True}
             else:
                 data.pop("pip", None)
@@ -322,13 +371,13 @@ def apply(sessions: list[Session]) -> list[tuple[str, list, float]]:
                 sc.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             except OSError:
                 pass
-        out.append((s.data.path, list(fp), s.front.offset))
+        out.append((s.data.path, list(fp), s.main.offset))
     return out
 
 
 def summary(s: Session) -> str:
     bits = []
-    for label, c in (("front", s.front), ("rear", s.rear)):
+    for label, c in (("video", s.main), ("second camera", s.second)):
         if c is not None:
             bits.append(f"{label} {c.video.name} ({c.score:.0%})")
     return ", ".join(bits) or "no video"

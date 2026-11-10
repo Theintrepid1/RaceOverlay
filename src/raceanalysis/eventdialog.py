@@ -3,9 +3,10 @@
 """File → Open event folder…: tie a hand-organised event together.
 
 Scans the folder (racecore.event), syncs every GoPro recording to the data
-file it fits, and shows the result for review: one row per session with
-its front and rear cameras. Open saves the pairings next to the videos and
-opens the sessions; next time Open track day opens the same folder at once.
+file it fits, and shows the result for review: one row per session with its
+video, and a second camera when one was running at the same time (or added
+here by hand). Open saves the pairings next to the videos and opens the
+sessions; next time Open track day opens the same folder at once.
 """
 from __future__ import annotations
 
@@ -16,12 +17,14 @@ from PySide6 import QtCore, QtWidgets
 
 from racecore import event
 
-COLS = ["", "Session", "Data file", "Front camera", "Rear camera", "Match"]
+COLS = ["", "Session", "Data file", "Video", "Second camera", "Match"]
+SECOND_COL = 4
 
 
 class _Bridge(QtCore.QObject):
     progress = QtCore.Signal(str)
     done = QtCore.Signal(object, object, object)       # scan, sessions, error
+    added = QtCore.Signal(int, object)                 # row, error (None = ok)
 
 
 class EventDialog(QtWidgets.QDialog):
@@ -37,6 +40,7 @@ class EventDialog(QtWidgets.QDialog):
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_progress)
         self.bridge.done.connect(self._on_done)
+        self.bridge.added.connect(self._on_added)
 
         lay = QtWidgets.QVBoxLayout(self)
         self.status = QtWidgets.QLabel("Looking through the folder…")
@@ -57,17 +61,25 @@ class EventDialog(QtWidgets.QDialog):
         self.table.itemChanged.connect(self._item_changed)
         lay.addWidget(self.table, 1)
         row = QtWidgets.QHBoxLayout()
-        self.btn_swap = QtWidgets.QPushButton("Swap front and rear for every session")
-        self.btn_swap.setToolTip("The cameras are told apart by which way they face; "
-                                 "which way is the front is a guess unless a file or "
-                                 "folder name says so")
+        self.btn_add2 = QtWidgets.QPushButton("Add second camera…")
+        self.btn_add2.setToolTip("Pick another GoPro recording from the same session (a "
+                                 "rear or in-car camera); it's synced from its sensors and "
+                                 "shown picture-in-picture in Race Overlay")
+        self.btn_add2.clicked.connect(self._add_second)
+        self.btn_rm2 = QtWidgets.QPushButton("Remove second camera")
+        self.btn_rm2.clicked.connect(self._remove_second)
+        self.btn_swap = QtWidgets.QPushButton("Swap video and second camera everywhere")
+        self.btn_swap.setToolTip("With two cameras, which one is the main video is told by "
+                                 "which way it faces; that's a guess unless a file or "
+                                 "folder name says front or rear")
         self.btn_swap.clicked.connect(self._swap_all)
         self.btn_swap_one = QtWidgets.QPushButton("Swap for this session")
         self.btn_swap_one.clicked.connect(self._swap_one)
-        row.addWidget(self.btn_swap)
-        row.addWidget(self.btn_swap_one)
+        for b in (self.btn_add2, self.btn_rm2, self.btn_swap, self.btn_swap_one):
+            row.addWidget(b)
         row.addStretch(1)
         lay.addLayout(row)
+        self.table.itemSelectionChanged.connect(self._refresh_buttons)
         self.left_out = QtWidgets.QTextBrowser()
         self.left_out.setMaximumHeight(130)
         self.left_out.setVisible(False)
@@ -108,22 +120,30 @@ class EventDialog(QtWidgets.QDialog):
             self._refresh_buttons()
             return
         self.sc, self.sessions = sc, sessions
-        n_vid = sum(1 for s in sessions for c in (s.front, s.rear) if c)
-        if not sessions:
-            self.status.setText("No data files with g data in this folder.")
-        else:
-            self.status.setText(
-                f"{len(sessions)} session(s), {n_vid} camera recording(s) matched. Check "
-                "the front and rear cameras, untick anything you don't want, then Open. "
-                "Double-click a name to change it.")
+        self._status_text()
         self._fill()
         self._fill_left_out()
         self._refresh_buttons()
 
     # ----- table -----
 
+    def _status_text(self):
+        sessions = self.sessions
+        if not sessions:
+            self.status.setText("No data files with g data in this folder.")
+            return
+        with_video = sum(1 for s in sessions if s.main)
+        seconds = sum(1 for s in sessions if s.second)
+        text = f"{len(sessions)} session(s), {with_video} with a video"
+        if seconds:
+            text += (f", {seconds} with a second camera (it ran at the same time; "
+                     "check which one should be the main video)")
+        self.status.setText(text + ". Untick anything you don't want, then Open. "
+                            "Double-click a name to change it.")
+
     def _fill(self):
         t = self.table
+        t.setColumnHidden(SECOND_COL, not any(s.second for s in self.sessions))
         t.blockSignals(True)
         t.setRowCount(len(self.sessions))
         for r, s in enumerate(self.sessions):
@@ -134,12 +154,12 @@ class EventDialog(QtWidgets.QDialog):
             title = QtWidgets.QTableWidgetItem(s.title)
             t.setItem(r, 1, title)
             for col, text, tip in ((2, Path(s.data.path).name, s.data.path),
-                                   (3, *self._cam(s.front)), (4, *self._cam(s.rear))):
+                                   (3, *self._cam(s.main)), (4, *self._cam(s.second))):
                 it = QtWidgets.QTableWidgetItem(text)
                 it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
                 it.setToolTip(tip)
                 t.setItem(r, col, it)
-            scores = [c.score for c in (s.front, s.rear) if c]
+            scores = [c.score for c in (s.main, s.second) if c]
             m = QtWidgets.QTableWidgetItem(
                 " / ".join(f"{x:.0%}" for x in scores) if scores else "no video")
             m.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
@@ -157,7 +177,7 @@ class EventDialog(QtWidgets.QDialog):
     def _fill_left_out(self):
         if self.sc is None:
             return
-        used = {c.video.parts[0] for s in self.sessions for c in (s.front, s.rear) if c}
+        used = {c.video.parts[0] for s in self.sessions for c in (s.main, s.second) if c}
         root = Path(self.folder)
 
         def rel(p: str) -> str:
@@ -169,7 +189,7 @@ class EventDialog(QtWidgets.QDialog):
         for s in self.sessions:
             for c in s.extra:
                 lines.append(f"{rel(c.video.parts[0])}: also fits {Path(s.data.path).name} "
-                             "(a third camera, or another copy); not used")
+                             "(another recording from that session); not used")
         for v in self.sc.videos:
             if v.parts[0] not in used and v.note:
                 lines.append(f"{rel(v.parts[0])}: {v.note}")
@@ -199,20 +219,75 @@ class EventDialog(QtWidgets.QDialog):
         event.swap_all(self.sessions)
         self._fill()
 
-    def _swap_one(self):
+    def _row(self):
         r = self.table.currentRow()
-        if 0 <= r < len(self.sessions):
-            s = self.sessions[r]
-            if s.rear is not None:
-                s.front, s.rear = s.rear, s.front
-                self._fill()
-                self.table.selectRow(r)
+        return (r, self.sessions[r]) if 0 <= r < len(self.sessions) else (r, None)
+
+    def _swap_one(self):
+        r, s = self._row()
+        if s is not None and s.second is not None:
+            s.main, s.second = s.second, s.main
+            self._fill()
+            self.table.selectRow(r)
+
+    def _add_second(self):
+        from raceoverlay import media
+        from raceoverlay.syncgui import pick_file
+        r, s = self._row()
+        if s is None:
+            return
+        p = pick_file(self, f"Second camera for {s.title}", "video",
+                      "Videos (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
+        if not p:
+            return
+        parts = media.find_chapters(p)
+        self._busy = True
+        self.bar.setVisible(True)
+        self.status.setText(f"Syncing {Path(p).name} to {s.title}…")
+        self._refresh_buttons()
+
+        def work():
+            try:
+                event.add_second(s, parts)
+                self.bridge.added.emit(r, None)
+            except Exception as e:  # noqa: BLE001 - shown in the dialog
+                self.bridge.added.emit(r, e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_added(self, r, err):
+        self._busy = False
+        self.bar.setVisible(False)
+        if err is not None:
+            self.status.setText(f"<b>Not added:</b> {err}. (Videos without a GoPro sensor "
+                                "track can be added in Race Overlay's Second camera section "
+                                "and lined up by hand.)")
+        else:
+            self._status_text()
+        self._fill()
+        self.table.selectRow(r)
+        self._refresh_buttons()
+
+    def _remove_second(self):
+        r, s = self._row()
+        if s is not None and s.second is not None:
+            s.second = None
+            self._fill()
+            self._status_text()
+            self.table.selectRow(r)
 
     def _refresh_buttons(self):
         have = any(s.use for s in self.sessions)
+        two = any(s.second for s in self.sessions)
+        _r, sel = self._row()
         self.btn_open.setEnabled(not self._busy and have)
-        self.btn_swap.setEnabled(not self._busy and any(s.rear for s in self.sessions))
-        self.btn_swap_one.setEnabled(not self._busy and any(s.rear for s in self.sessions))
+        self.btn_add2.setEnabled(not self._busy and sel is not None)
+        self.btn_rm2.setVisible(two)
+        self.btn_rm2.setEnabled(not self._busy and sel is not None and sel.second is not None)
+        for b in (self.btn_swap, self.btn_swap_one):
+            b.setVisible(two)
+        self.btn_swap.setEnabled(not self._busy)
+        self.btn_swap_one.setEnabled(not self._busy and sel is not None
+                                     and sel.second is not None)
         self.btn_cancel.setText("Stop" if self._busy else "Cancel")
 
     # ----- finish -----

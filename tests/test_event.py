@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Opening a hand-organised event folder: each GoPro recording finds its
-data file, front and rear cameras are told apart by how they're mounted,
-copies and exports are left out, and the result opens like an import."""
+data file, one camera is the usual case, a second camera (running at the
+same time) is found or added by hand, front and rear are told apart by how
+they're mounted, copies and exports are left out, and the result opens
+like an import."""
 import json
 import os
 import shutil
@@ -19,7 +21,7 @@ from test_gosync import _clip, _session  # noqa: E402
 APEX = Path(__file__).parent / "data" / "Virginia_Intl_Raceway_Full__812128378.csv"
 
 
-def _event(tmp: Path, rear_name="GH010002.MP4", front_yaw=10.0):
+def _event(tmp: Path, rear_name="GH010002.MP4", front_yaw=10.0, rear=True):
     """Two sessions, each with a front and a rear GoPro (the rear one turned
     round on its mount), plus an export and an edit list. Camera data is
     faked from the data files' g (no real video needed)."""
@@ -31,8 +33,10 @@ def _event(tmp: Path, rear_name="GH010002.MP4", front_yaw=10.0):
         data = d / f"session{i + 1}.csv"
         data.write_text(f"data for {name}")
         tels[str(data)] = tel
-        for cam, yaw, off in (("GH010001.MP4", front_yaw, 200.0 + i),
-                              (rear_name, front_yaw + 180.0, 230.0 + i)):
+        cams = [("GH010001.MP4", front_yaw, 200.0 + i)]
+        if rear:
+            cams.append((rear_name, front_yaw + 180.0, 230.0 + i))
+        for cam, yaw, off in cams:
             v = d / cam
             v.write_bytes(f"{name}/{cam}".encode())
             accel[str(v)] = _clip(tel, off, 300, yaw_deg=yaw, seed=20 + i)
@@ -62,18 +66,18 @@ def test_front_and_rear_found_and_exports_skipped():
         sessions = event.match(sc, read=lambda v: accel[v.parts[0]])
         assert [s.title for s in sessions] == ["Saturday Scored 1", "Sunday Scored 2"]
         for s in sessions:
-            assert s.front is not None and s.rear is not None and not s.extra
-            assert s.front.data is s.data and s.rear.data is s.data
+            assert s.main is not None and s.second is not None and not s.extra
+            assert s.main.data is s.data and s.second.data is s.data
             # the two cameras see the car's forward the opposite way round (not
             # exactly: this fake session brakes far more than it accelerates,
             # which tilts each camera's gravity estimate)
-            assert event._dot(s.front.forward, s.rear.forward) < -0.3
-        fronts = {s.front.video.name for s in sessions}
-        rears = {s.rear.video.name for s in sessions}
+            assert event._dot(s.main.forward, s.second.forward) < -0.3
+        fronts = {s.main.video.name for s in sessions}
+        rears = {s.second.video.name for s in sessions}
         assert len(fronts) == 1 and len(rears) == 1 and fronts != rears   # consistent
         s = sessions[0]
-        assert abs(s.front.offset - 200.0) < 0.15 and abs(s.rear.offset - 230.0) < 0.15
-        clips = [c for x in sessions for c in (x.front, x.rear)]
+        assert abs(s.main.offset - 200.0) < 0.15 and abs(s.second.offset - 230.0) < 0.15
+        clips = [c for x in sessions for c in (x.main, x.second)]
         assert event.facing_clarity(clips) > 0.3
 
 
@@ -82,9 +86,9 @@ def test_names_decide_which_camera_is_the_front():
         tmp = Path(t)
         tels, accel = _event(tmp, rear_name="REAR GH010002.MP4")
         sessions = event.match(_scan(tmp, tels, accel), read=lambda v: accel[v.parts[0]])
-        assert all(s.rear.video.name.startswith("REAR") for s in sessions)
+        assert all(s.second.video.name.startswith("REAR") for s in sessions)
         event.swap_all(sessions)                       # one click for the whole event
-        assert all(s.front.video.name.startswith("REAR") for s in sessions)
+        assert all(s.main.video.name.startswith("REAR") for s in sessions)
 
 
 def test_apply_saves_sidecars_with_the_rear_camera_and_names():
@@ -100,9 +104,9 @@ def test_apply_saves_sidecars_with_the_rear_camera_and_names():
         sc = json.loads(ingest.sidecar_path(parts).read_text())
         assert sc["csv"] == str(Path(csv).resolve()) and sc["synced"]
         pip = sc["pip"]
-        assert pip["parts"] == [str(Path(p).resolve()) for p in s.rear.video.parts]
+        assert pip["parts"] == [str(Path(p).resolve()) for p in s.second.video.parts]
         # rear time = front time + (front offset - rear offset)
-        assert abs(pip["offset"] - (s.front.offset - s.rear.offset)) < 1e-3
+        assert abs(pip["offset"] - (s.main.offset - s.second.offset)) < 1e-3
         assert day.Notes.load(csv).title == "Saturday Scored 1"
         # Open track day now finds it inside its session folder
         found = ingest.synced_sessions(str(tmp))
@@ -138,7 +142,7 @@ def test_unmatched_clip_left_out():
         accel[str(stray)] = _clip(_session(seed=99), 100.0, 300)
         sc = _scan(tmp, tels, accel)
         sessions = event.match(sc, read=lambda v: accel[v.parts[0]])
-        used = {c.video.parts[0] for s in sessions for c in (s.front, s.rear) if c}
+        used = {c.video.parts[0] for s in sessions for c in (s.main, s.second) if c}
         assert str(stray) not in used
         v = next(v for v in sc.videos if v.parts[0] == str(stray))
         assert v.note == "didn't match any data file"
@@ -151,3 +155,60 @@ def test_name_hints(name, front):
     r = bool(event.REAR_WORDS.search(name))
     assert (f, r) == ((True, False) if front else (False, True) if front is False
                       else (False, False))
+
+
+def _one_camera(tmp):
+    tels, accel = _event(tmp, rear=False)
+    return tels, accel
+
+
+def test_one_camera_is_the_usual_case():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        tels, accel = _one_camera(tmp)
+        sessions = event.match(_scan(tmp, tels, accel), read=lambda v: accel[v.parts[0]])
+        for s in sessions:
+            assert s.main is not None and s.main.video.name == "GH010001.MP4"
+            assert s.second is None and not s.extra
+        items = event.apply(sessions)
+        sc = json.loads(ingest.sidecar_path(items[0][1]).read_text())
+        assert "pip" not in sc
+
+
+def test_camera_stopped_and_started_is_not_a_second_camera():
+    """Two recordings one after the other (recording stopped in the pits):
+    the same camera, so no second camera; the best one is the video."""
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        tels, accel = _one_camera(tmp)
+        d = tmp / "Saturday Scored 1"
+        later = d / "GH010003.MP4"
+        later.write_bytes(b"after the pit stop")
+        tel = tels[str(d / "session1.csv")]
+        accel[str(later)] = _clip(tel, 560.0, 300, yaw_deg=10.0, seed=31)
+        sessions = event.match(_scan(tmp, tels, accel), read=lambda v: accel[v.parts[0]])
+        s = sessions[0]
+        assert s.second is None
+        assert {s.main.video.name} | {c.video.name for c in s.extra} == \
+            {"GH010001.MP4", "GH010003.MP4"}
+        assert event.overlap(s.main, s.extra[0]) == 0
+
+
+def test_second_camera_added_by_hand():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        tels, accel = _one_camera(tmp)
+        sessions = event.match(_scan(tmp, tels, accel), read=lambda v: accel[v.parts[0]])
+        s = sessions[0]
+        tel = tels[s.data.path]
+        cam2 = _clip(tel, 215.0, 240, yaw_deg=190.0, seed=41)
+        c = event.add_second(s, ["/x/rear.MP4"], read=lambda parts: cam2)
+        assert s.second is c and abs(c.offset - 215.0) < 0.15
+        # a video from another session is refused
+        other = _clip(_session(seed=77), 100.0, 240, seed=42)
+        with pytest.raises(ValueError):
+            event.add_second(sessions[1], ["/x/other.MP4"], read=lambda parts: other)
+        assert sessions[1].second is None
+        items = event.apply([s])
+        sc = json.loads(ingest.sidecar_path(items[0][1]).read_text())
+        assert sc["pip"]["parts"] == [str(Path("/x/rear.MP4").resolve())]
