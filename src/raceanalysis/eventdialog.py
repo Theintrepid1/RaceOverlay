@@ -24,7 +24,7 @@ SECOND_COL = 4
 class _Bridge(QtCore.QObject):
     progress = QtCore.Signal(str)
     done = QtCore.Signal(object, object, object)       # scan, sessions, error
-    added = QtCore.Signal(int, object)                 # row, error (None = ok)
+    picked = QtCore.Signal(int, str, object, object, object)   # row, which, parts, clip, error
 
 
 class EventDialog(QtWidgets.QDialog):
@@ -40,7 +40,7 @@ class EventDialog(QtWidgets.QDialog):
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_progress)
         self.bridge.done.connect(self._on_done)
-        self.bridge.added.connect(self._on_added)
+        self.bridge.picked.connect(self._on_picked)
 
         lay = QtWidgets.QVBoxLayout(self)
         self.status = QtWidgets.QLabel("Looking through the folder…")
@@ -61,11 +61,19 @@ class EventDialog(QtWidgets.QDialog):
         self.table.itemChanged.connect(self._item_changed)
         lay.addWidget(self.table, 1)
         row = QtWidgets.QHBoxLayout()
+        self.btn_pick = QtWidgets.QPushButton("Choose video…")
+        self.btn_pick.setToolTip("Pick the video for the selected session yourself; it's "
+                                 "synced from its motion sensors, or by hand when it can't be")
+        self.btn_pick.clicked.connect(lambda: self._pick("main"))
+        self.btn_hand = QtWidgets.QPushButton("Sync by hand…")
+        self.btn_hand.setToolTip("Line the selected session's video up with its data yourself "
+                                 "(also for a second camera, if it has one)")
+        self.btn_hand.clicked.connect(self._by_hand)
         self.btn_add2 = QtWidgets.QPushButton("Add second camera…")
         self.btn_add2.setToolTip("Pick another GoPro recording from the same session (a "
                                  "rear or in-car camera); it's synced from its sensors and "
                                  "shown picture-in-picture in Race Overlay")
-        self.btn_add2.clicked.connect(self._add_second)
+        self.btn_add2.clicked.connect(lambda: self._pick("second"))
         self.btn_rm2 = QtWidgets.QPushButton("Remove second camera")
         self.btn_rm2.clicked.connect(self._remove_second)
         self.btn_swap = QtWidgets.QPushButton("Swap video and second camera everywhere")
@@ -75,7 +83,8 @@ class EventDialog(QtWidgets.QDialog):
         self.btn_swap.clicked.connect(self._swap_all)
         self.btn_swap_one = QtWidgets.QPushButton("Swap for this session")
         self.btn_swap_one.clicked.connect(self._swap_one)
-        for b in (self.btn_add2, self.btn_rm2, self.btn_swap, self.btn_swap_one):
+        for b in (self.btn_pick, self.btn_hand, self.btn_add2, self.btn_rm2, self.btn_swap,
+                  self.btn_swap_one):
             row.addWidget(b)
         row.addStretch(1)
         lay.addLayout(row)
@@ -159,9 +168,9 @@ class EventDialog(QtWidgets.QDialog):
                 it.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
                 it.setToolTip(tip)
                 t.setItem(r, col, it)
-            scores = [c.score for c in (s.main, s.second) if c]
-            m = QtWidgets.QTableWidgetItem(
-                " / ".join(f"{x:.0%}" for x in scores) if scores else "no video")
+            scores = ["by hand" if c.video.note == "synced by hand" else f"{c.score:.0%}"
+                      for c in (s.main, s.second) if c]
+            m = QtWidgets.QTableWidgetItem(" / ".join(scores) if scores else "no video")
             m.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
             m.setToolTip("How well each camera's motion sensors match the data file")
             t.setItem(r, 5, m)
@@ -230,42 +239,99 @@ class EventDialog(QtWidgets.QDialog):
             self._fill()
             self.table.selectRow(r)
 
-    def _add_second(self):
+    def _pick(self, which: str):
+        """Choose the video (which="main") or a second camera for the
+        selected session; synced from its sensors, else by hand."""
         from raceoverlay import media
         from raceoverlay.syncgui import pick_file
         r, s = self._row()
         if s is None:
             return
-        p = pick_file(self, f"Second camera for {s.title}", "video",
+        what = "Video" if which == "main" else "Second camera"
+        p = pick_file(self, f"{what} for {s.title}", "video",
                       "Videos (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
         if not p:
             return
         parts = media.find_chapters(p)
         self._busy = True
         self.bar.setVisible(True)
-        self.status.setText(f"Syncing {Path(p).name} to {s.title}…")
+        self.status.setText(f"Syncing {Path(p).name} to {s.title} from its sensors…")
         self._refresh_buttons()
 
         def work():
             try:
-                event.add_second(s, parts)
-                self.bridge.added.emit(r, None)
-            except Exception as e:  # noqa: BLE001 - shown in the dialog
-                self.bridge.added.emit(r, e)
+                self.bridge.picked.emit(r, which, parts, event.sync_clip(s, parts), None)
+            except Exception as e:  # noqa: BLE001 - offered a manual sync instead
+                self.bridge.picked.emit(r, which, parts, None, e)
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_added(self, r, err):
+    def _on_picked(self, r, which, parts, clip, err):
         self._busy = False
         self.bar.setVisible(False)
-        if err is not None:
-            self.status.setText(f"<b>Not added:</b> {err}. (Videos without a GoPro sensor "
-                                "track can be added in Race Overlay's Second camera section "
-                                "and lined up by hand.)")
-        else:
-            self._status_text()
+        s = self.sessions[r]
+        if clip is None:
+            from racecore import gosync
+            why = ("it has no GoPro sensor track" if isinstance(err, gosync.NoCameraData)
+                   else str(err))
+            q = QtWidgets.QMessageBox.question(
+                self, "Sync by hand?",
+                f"{Path(parts[0]).name} couldn't be synced automatically: {why}.\n\n"
+                "Line it up by hand instead?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes)
+            if q == QtWidgets.QMessageBox.Yes:
+                clip = self._manual(s, parts, None)
+        if clip is not None:
+            if which == "main":
+                event.set_video(s, clip)
+            else:
+                s.second = clip
+        self._status_text()
         self._fill()
         self.table.selectRow(r)
         self._refresh_buttons()
+
+    def _manual(self, s, parts, offset):
+        """The sync-by-hand window; a Clip, or None when cancelled."""
+        from .manualsync import ManualSyncDialog
+        dlg = ManualSyncDialog(self, s.data.tel, parts, offset, s.title,
+                               getattr(self.parent(), "use_mph", True))
+        if not dlg.exec():
+            return None
+        dur = dlg.info.duration if dlg.info is not None else 0.0
+        return event.manual_clip(s, parts, dlg.offset, dur)
+
+    def _by_hand(self):
+        r, s = self._row()
+        if s is None:
+            return
+        target = "main"
+        if s.second is not None:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Sync by hand")
+            box.setText("Which video?")
+            b1 = box.addButton(f"Video ({s.main.video.name})", QtWidgets.QMessageBox.AcceptRole)
+            b2 = box.addButton(f"Second camera ({s.second.video.name})",
+                               QtWidgets.QMessageBox.AcceptRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() not in (b1, b2):
+                return
+            target = "main" if box.clickedButton() is b1 else "second"
+        cur = s.main if target == "main" else s.second
+        if cur is None:
+            self._pick("main")
+            return
+        clip = self._manual(s, cur.video.parts, cur.offset)
+        if clip is not None:
+            clip.forward, clip.score = cur.forward, cur.score
+            clip.video.has_sensors = cur.video.has_sensors
+            if target == "main":
+                s.main = clip
+            else:
+                s.second = clip
+            self._fill()
+            self.table.selectRow(r)
 
     def _remove_second(self):
         r, s = self._row()
@@ -280,7 +346,8 @@ class EventDialog(QtWidgets.QDialog):
         two = any(s.second for s in self.sessions)
         _r, sel = self._row()
         self.btn_open.setEnabled(not self._busy and have)
-        self.btn_add2.setEnabled(not self._busy and sel is not None)
+        for b in (self.btn_pick, self.btn_hand, self.btn_add2):
+            b.setEnabled(not self._busy and sel is not None)
         self.btn_rm2.setVisible(two)
         self.btn_rm2.setEnabled(not self._busy and sel is not None and sel.second is not None)
         for b in (self.btn_swap, self.btn_swap_one):

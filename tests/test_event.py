@@ -212,3 +212,24 @@ def test_second_camera_added_by_hand():
         items = event.apply([s])
         sc = json.loads(ingest.sidecar_path(items[0][1]).read_text())
         assert sc["pip"]["parts"] == [str(Path("/x/rear.MP4").resolve())]
+
+
+def test_choose_video_and_sync_by_hand():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        tels, accel = _one_camera(tmp)
+        sessions = event.match(_scan(tmp, tels, accel), read=lambda v: accel[v.parts[0]])
+        s = sessions[0]
+        old = s.main
+        # picking a video that syncs from its sensors
+        better = _clip(tels[s.data.path], 400.0, 200, yaw_deg=10.0, seed=51)
+        c = event.sync_clip(s, ["/x/picked.MP4"], read=lambda parts: better)
+        event.set_video(s, c)
+        assert s.main is c and abs(c.offset - 400.0) < 0.15 and old in s.extra
+        # one that can't be synced (a phone video): lined up by hand
+        m = event.manual_clip(s, ["/x/phone.mp4"], 123.4, 300.0)
+        event.set_video(s, m)
+        assert s.main is m and m.score == 0 and m.video.note == "synced by hand"
+        assert m.span == (123.4, 423.4)
+        items = event.apply([s])
+        assert items == [(s.data.path, ["/x/phone.mp4"], 123.4)]

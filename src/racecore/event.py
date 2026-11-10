@@ -314,9 +314,11 @@ def swap_all(sessions: list[Session]):
             s.main, s.second = s.second, s.main
 
 
-def add_second(s: Session, parts: list, read=None) -> Clip:
-    """Sync a video picked by hand to session s's data file and make it the
-    second camera. Raises ValueError when its sensors don't match."""
+def sync_clip(s: Session, parts: list, read=None) -> Clip:
+    """Sync a video picked by hand to session s's data file from its motion
+    sensors. Raises ValueError (gosync.NoCameraData when it has no GoPro
+    sensor track) when it can't; then it can be synced by hand
+    (manual_clip)."""
     from . import gosync
     t, a = read(parts) if read else gosync.read_accel(_parts_with_starts(parts))
     h = gosync.camera_horizontal(a)
@@ -326,8 +328,30 @@ def add_second(s: Session, parts: list, read=None) -> Clip:
                          f"({res.score:.0%})")
     _car, info = gosync.to_car_frame(t, h, s.data.tel, res.offset)
     fwd = gosync.car_forward(a, info)
-    c = Clip(Video(list(parts), True), s.data, res.offset, res.score,
-             tuple(float(x) for x in fwd), float(t[-1] - t[0]) if len(t) > 1 else 0.0)
+    return Clip(Video(list(parts), True), s.data, res.offset, res.score,
+                tuple(float(x) for x in fwd), float(t[-1] - t[0]) if len(t) > 1 else 0.0)
+
+
+def manual_clip(s: Session, parts: list, offset: float, duration: float = 0.0) -> Clip:
+    """A video lined up by hand (score 0: no sensor match behind it)."""
+    return Clip(Video(list(parts), False, "synced by hand"), s.data, float(offset), 0.0,
+                (0.0, 0.0, 0.0), float(duration))
+
+
+def set_video(s: Session, clip: Clip):
+    """Make clip the session's video; the old one goes to extra."""
+    if s.main is not None and s.main is not clip:
+        s.extra.insert(0, s.main)
+    s.main = clip
+    if s.second is clip:
+        s.second = None
+    s.extra = [c for c in s.extra if c is not clip]
+
+
+def add_second(s: Session, parts: list, read=None) -> Clip:
+    """Sync a video picked by hand to session s's data file and make it the
+    second camera. Raises ValueError when its sensors don't match."""
+    c = sync_clip(s, parts, read)
     s.second = c
     return c
 
