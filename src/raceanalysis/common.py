@@ -28,10 +28,13 @@ def session_name(path: str) -> str:
     (APEX ID-style name, time not known yet), else the file name, shortened."""
     from racecore import day
     exists = Path(path).exists()
+    notes = day.Notes.load(path) if exists else None
+    if notes is not None and notes.title:      # named when opening an event folder
+        return elide(notes.title, 28)
     lg = ingest.log_info(path)
     if lg.session and not lg.guessed:
         return f"Session {lg.session} · {lg.date:%b} {lg.date.day}"
-    when = day.Notes.load(path).start_dt() if exists else None
+    when = notes.start_dt() if notes is not None else None
     if when is not None:
         return f"{when:%b} {when.day} · {when:%H:%M}"
     if not lg.guessed and lg.date:

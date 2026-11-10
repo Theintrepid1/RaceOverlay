@@ -99,6 +99,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         m = mb.addMenu("&File")
         m.addAction("Import from GoPro card…", self.import_card, "Ctrl+I")
         m.addAction("Open track day…", self.open_day, "Ctrl+O")
+        m.addAction("Open event folder…", self.open_event)
         m.addAction("Add data file…", self.add_session_dialog)
         m.addSeparator()
         self.act_find = m.addAction("Find video for this session…", self.find_video)
@@ -799,10 +800,29 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if not found:
             QtWidgets.QMessageBox.information(
                 self, "Nothing synced here",
-                "No synced videos in this folder. Import from the card first, or use "
+                "No synced videos in this folder. Import from the card first, use "
+                "File → Open event folder… for a folder organised by hand, or "
                 "File → Add data file… and Find video for this session….")
             return
         self.add_many(found)
+
+    def open_event(self):
+        """A folder organised by hand (a folder per session, front and rear
+        cameras, data files): match everything up, review, open."""
+        from .eventdialog import EventDialog
+        from .importer import _pick_dir
+        s = settings()
+        d = _pick_dir(self, "Event folder", s.value("analysis/event", "")
+                      or s.value("analysis/day", ""))
+        if not d:
+            return
+        s.setValue("analysis/event", d)
+        s.setValue("analysis/day", d)
+        dlg = EventDialog(self, d)
+        if dlg.exec() and dlg.result:
+            n = self.add_many(dlg.result)
+            self.status(f"Opened {n} session(s). Next time, Open track day opens "
+                        "this folder straight away.")
 
     def add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",

@@ -56,6 +56,7 @@ class Notes:
     fuel: str = ""
     changes: str = ""            # setup / driving changes before this session
     text: str = ""               # anything else
+    title: str = ""              # session name, e.g. from its folder ("Sunday Scored 1")
     weather: dict = field(default_factory=dict)   # filled by fetch: air_c, humidity, ...
 
     @staticmethod

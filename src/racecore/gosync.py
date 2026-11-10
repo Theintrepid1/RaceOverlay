@@ -100,6 +100,19 @@ def _slide(long: np.ndarray, short: np.ndarray) -> np.ndarray:
     return num / (m * wstd)
 
 
+def horizontal_basis(accel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(gravity direction, e1, e2) in the camera's own axes: e1 and e2 span
+    the horizontal plane that camera_horizontal() projects onto."""
+    a = np.asarray(accel, dtype=float) / G
+    grav = np.median(a, axis=0)
+    gz = grav / np.linalg.norm(grav)
+    ref = np.eye(3)[int(np.argmin(np.abs(gz)))]  # axis least like gravity
+    e1 = ref - (gz @ ref) * gz
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(gz, e1)
+    return gz, e1, e2
+
+
 def camera_horizontal(accel: np.ndarray) -> np.ndarray:
     """(N,3) camera accelerometer in m/s^2 -> (N,2) horizontal linear g.
 
@@ -107,14 +120,21 @@ def camera_horizontal(accel: np.ndarray) -> np.ndarray:
     the car; to_car_frame() fixes that once the offset is known.
     """
     a = np.asarray(accel, dtype=float) / G
-    grav = np.median(a, axis=0)
-    gz = grav / np.linalg.norm(grav)
-    lin = a - grav
-    ref = np.eye(3)[int(np.argmin(np.abs(gz)))]  # axis least like gravity
-    e1 = ref - (gz @ ref) * gz
-    e1 /= np.linalg.norm(e1)
-    e2 = np.cross(gz, e1)
+    lin = a - np.median(a, axis=0)
+    _gz, e1, e2 = horizontal_basis(accel)
     return np.column_stack([lin @ e1, lin @ e2])
+
+
+def car_forward(accel: np.ndarray, info: dict) -> np.ndarray:
+    """Which way the car's forward is, in the camera's own 3D axes (a unit
+    vector), from to_car_frame()'s fit. Two cameras of the same kind, one
+    looking forward and one looking back, give opposite vectors, however
+    each fit came out (mirrored or not)."""
+    _gz, e1, e2 = horizontal_basis(accel)
+    rot = np.asarray(info["rot"])
+    f = -1.0 if info["flip"] else 1.0
+    v = e1 * rot[0, 0] + f * e2 * rot[1, 0]
+    return v / (np.linalg.norm(v) or 1.0)
 
 
 def _logger_g(tel: Telemetry):
@@ -222,6 +242,7 @@ def to_car_frame(cam_time: np.ndarray, cam_h: np.ndarray, tel: Telemetry,
     info = {
         "angle": float(np.degrees(np.arctan2(rot[1, 0], rot[0, 0]))),
         "flip": bool(flip < 0),
+        "rot": rot.tolist(),
         "lon_fit": _corr(car_sm[:, 0], ref[:, 0]),
         "lat_fit": _corr(car_sm[:, 1], ref[:, 1]),
     }

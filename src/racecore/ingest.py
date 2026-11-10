@@ -462,7 +462,12 @@ def synced_sessions(folder: str) -> list[tuple[str, list[str], float]]:
     """(csv, video files, offset) for every synced recording in a folder (a
     track day), oldest recording first."""
     out = []
-    for sc in sorted(Path(folder).glob("*.sync.json")):
+    # this folder and folders inside it (events organised one folder per session)
+    found = sorted(Path(folder).glob("*.sync.json"))
+    for depth in ("*/*.sync.json", "*/*/*.sync.json"):
+        found += sorted(Path(folder).glob(depth))
+    seen_csv = set()
+    for sc in found:
         try:
             data = json.loads(sc.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -473,5 +478,8 @@ def synced_sessions(folder: str) -> list[tuple[str, list[str], float]]:
             continue
         if not all(Path(p).exists() for p in parts):
             continue
+        if csv in seen_csv:              # one video per session (the main camera)
+            continue
+        seen_csv.add(csv)
         out.append((csv, list(parts), float(data.get("offset", 0.0))))
     return out
