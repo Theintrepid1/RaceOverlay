@@ -143,6 +143,9 @@ def main():
     ap.add_argument("--excludelist", required=True, type=Path)
     ap.add_argument("--out", type=Path, default=ROOT / "dist")
     ap.add_argument("--work", type=Path, default=ROOT / "build")
+    ap.add_argument("--label", default=None,
+                    help='test-build label for the title bar, e.g. "PR 28" (default: '
+                         "the branch name off main, none on main)")
     a = ap.parse_args()
 
     sys.path.insert(0, str(ROOT / "src"))
@@ -154,6 +157,11 @@ def main():
 
     # 1. Python app + Qt
     src = ROOT / "src" / "raceoverlay"
+    sys.path.insert(0, str(ROOT / "packaging"))
+    import buildlabel
+    label_file, label_text = buildlabel.write(work / "label", a.label)
+    if label_text:
+        print(f"Test build: {label_text}")
     cmd = ["pyinstaller", "--noconfirm", "--clean", "--name", "raceoverlay",
            "--distpath", str(work / "dist"), "--workpath", str(work / "pyi"),
            "--specpath", str(work), "--paths", str(ROOT / "src"),
@@ -164,6 +172,7 @@ def main():
            "--add-data", f"{src / 'icon.svg'}:raceoverlay",
            "--add-data", f"{src / 'icon_analysis.svg'}:raceoverlay",
            "--add-data", f"{ROOT / 'tracks'}:tracks",  # built-in track library
+           "--add-data", f"{label_file}:raceoverlay",
            "--hidden-import", "mpv",
            "--runtime-hook", str(ROOT / "packaging" / "raceoverlay_boot.py")]
     for m in EXCLUDE_MODULES:

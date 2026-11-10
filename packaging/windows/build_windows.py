@@ -72,6 +72,8 @@ def iscc() -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-installer", action="store_true")
+    ap.add_argument("--label", default=None,
+                    help='test-build label for the title bar, e.g. "PR 28"')
     a = ap.parse_args(argv)
     if sys.platform != "win32":
         sys.exit("Build this on Windows (PyInstaller can't cross-compile).")
@@ -86,6 +88,11 @@ def main(argv=None) -> int:
     icon = make_icon(WORK / "raceoverlay.ico")
     icon_an = make_icon(WORK / "raceanalysis.ico", "icon_analysis.svg")
     src = ROOT / "src" / "raceoverlay"
+    sys.path.insert(0, str(ROOT / "packaging"))
+    import buildlabel
+    label_file, label_text = buildlabel.write(WORK / "label", a.label)
+    if label_text:
+        print(f"Test build: {label_text}")
     sep = os.pathsep  # ';' on Windows, for --add-data
     cmd = ["pyinstaller", "--noconfirm", "--clean", "--windowed",
            "--name", "RaceOverlay", "--icon", icon,
@@ -98,6 +105,7 @@ def main(argv=None) -> int:
            "--add-data", f"{src / 'icon.svg'}{sep}raceoverlay",
            "--add-data", f"{src / 'icon_analysis.svg'}{sep}raceoverlay",
            "--add-data", f"{ROOT / 'tracks'}{sep}tracks",
+           "--add-data", f"{label_file}{sep}raceoverlay",
            "--add-binary", f"{BIN / 'ffmpeg.exe'}{sep}bin",
            "--add-binary", f"{BIN / 'ffprobe.exe'}{sep}bin",
            "--add-binary", f"{BIN / 'libmpv-2.dll'}{sep}bin",

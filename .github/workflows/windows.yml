@@ -68,7 +68,14 @@ jobs:
           python -m pytest -q -rf
 
       - name: Build installer
-        run: python packaging/windows/build_windows.py
+        shell: pwsh
+        run: |
+          # PR builds say so in the title bar; release builds don't
+          if ("${{ github.event_name }}" -eq "pull_request") {
+            python packaging/windows/build_windows.py --label "PR ${{ github.event.number }}"
+          } else {
+            python packaging/windows/build_windows.py --label ""
+          }
 
       - name: Self-test the built app
         shell: pwsh

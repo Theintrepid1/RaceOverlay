@@ -119,7 +119,11 @@ class UpdateDialog(QtWidgets.QDialog):
 
     def _refresh(self):
         how = KIND_TEXT.get(self.kind, self.kind)
-        self.head.setText(f"<b>Race Overlay {self.current}</b> &nbsp;<small>({how})</small>")
+        from raceoverlay import build_label
+        lab = build_label()
+        test = f"<br><small>Test build: {lab}</small>" if lab else ""
+        self.head.setText(f"<b>Race Overlay {self.current}</b> &nbsp;<small>({how})</small>"
+                          + test)
         prev = update.previous()
         can_install = self.kind in ("appimage", "windows") and not self._busy
         if prev:
