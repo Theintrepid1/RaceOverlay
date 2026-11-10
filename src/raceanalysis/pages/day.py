@@ -705,8 +705,9 @@ class DayPage(QtWidgets.QWidget):
         a = self.win.a
         for si, s in enumerate(a.sessions):
             n = self.notes[si]
-            if not n.start and s.video and ("start", si) not in self._busy:
-                self._run(si, "start", lambda s=s: day.find_start(s.video, *a.origin))
+            if not n.start and (s.video or day.log_start_utc(s.tel)) \
+                    and ("start", si) not in self._busy:
+                self._run(si, "start", lambda s=s: day.find_start(s.video, *a.origin, tel=s.tel))
             elif n.start_dt() and not n.weather:
                 self._fetch_weather(si, quiet=True)
 
