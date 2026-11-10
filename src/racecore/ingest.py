@@ -343,11 +343,35 @@ def log_info(path: str) -> Log:
             return Log(path, dt.date(int(y), int(mo), int(d)), int(n) if n else None)
         except ValueError:
             pass
+    if Path(path).suffix.lower() == ".vbo":
+        day = vbo_date(path)
+        if day is not None:
+            return Log(path, day)
     try:
         mtime = dt.date.fromtimestamp(Path(path).stat().st_mtime)
     except OSError:
         mtime = None
     return Log(path, mtime, guessed=True)
+
+
+def vbo_date(path: str) -> dt.date | None:
+    """The date on a VBO file's first line ("File created on 14/03/2021 at
+    17:31:07"; day first, as Racelogic and RaceChrono write it)."""
+    try:
+        with open(path, "r", encoding="latin-1") as f:
+            head = f.read(400)
+    except OSError:
+        return None
+    m = re.search(r"File created on (\d{1,2})/(\d{1,2})/(\d{4})", head)
+    if not m:
+        return None
+    try:
+        return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+
+
+LOG_SUFFIXES = (".csv", ".vbo")
 
 
 def is_apex_name(name: str) -> bool:
@@ -362,11 +386,12 @@ def log_id(path: str) -> str | None:
 
 
 def find_logs(folder: str) -> list[Log]:
-    """Logger CSVs in a folder (not recursive), newest first. APEX Pro
+    """Logger files (CSV, VBO) in a folder (not recursive), newest first. APEX Pro
     exports sometimes come without ".csv"; those are found by their name."""
     try:
         files = [str(p) for p in Path(folder).iterdir()
-                 if p.is_file() and (p.suffix.lower() == ".csv" or is_apex_name(p.name))]
+                 if p.is_file() and (p.suffix.lower() in LOG_SUFFIXES
+                                     or is_apex_name(p.name))]
     except OSError:
         return []
     logs = [log_info(f) for f in files]

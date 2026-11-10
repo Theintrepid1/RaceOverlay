@@ -306,10 +306,75 @@ def find(lat: float, lon: float, folder: Path | None = None) -> TrackProfile | N
     return best[1] if best else None
 
 
+def gate_at(lat, lon, lat0: float, lon0: float, near_m: float = 15.0):
+    """A timing line across this path at (lat0, lon0), as a VBO-style gate
+    (lat0, lon0, then a point 50 m back along the path), or None when the
+    path doesn't come within near_m of that point."""
+    lat = np.asarray(lat, float)
+    lon = np.asarray(lon, float)
+    ok = np.isfinite(lat) & np.isfinite(lon)
+    if ok.sum() < 20:
+        return None
+    xy = to_xy(lat, lon, lat0, lon0)
+    d = np.hypot(xy[:, 0], xy[:, 1])
+    d[~ok] = np.inf
+    i = int(np.argmin(d))
+    if d[i] > near_m:
+        return None
+    j0, j1 = max(0, i - 10), min(len(xy) - 1, i + 10)
+    v = xy[j1] - xy[j0]
+    n = float(np.hypot(*v))
+    if n < 1.0:
+        return None
+    lat2, lon2 = to_latlon((-v / n * 50.0)[None, :], lat0, lon0)[0]
+    return (lat0, lon0, float(lat2), float(lon2))
+
+
+def start_on_path(lat, lon, folder: Path | None = None, near_m: float = 15.0):
+    """A saved track whose start/finish point the path runs over (within
+    near_m), and that line as a VBO-style gate (lat1, lon1, lat2, lon2): the
+    start point, then a point 50 m back along the path's direction there.
+    None when no saved track's line is on this path."""
+    lat = np.asarray(lat, float)
+    lon = np.asarray(lon, float)
+    ok = np.isfinite(lat) & np.isfinite(lon)
+    if ok.sum() < 20:
+        return None
+    best = None
+    for p in load_all(folder):
+        xy = to_xy(lat, lon, p.lat0, p.lon0)
+        d = np.hypot(xy[:, 0], xy[:, 1])
+        d[~ok] = np.inf
+        i = int(np.argmin(d))
+        if d[i] <= near_m and (best is None or d[i] < best[0]):
+            best = (float(d[i]), p, i, xy)
+    if best is None:
+        return None
+    _d, prof, i, xy = best
+    # direction of travel there, from the samples a few metres either side
+    j0, j1 = max(0, i - 10), min(len(xy) - 1, i + 10)
+    v = xy[j1] - xy[j0]
+    n = float(np.hypot(*v))
+    if n < 1.0:
+        return None
+    back = -v / n * 50.0
+    lat2, lon2 = to_latlon(back[None, :], prof.lat0, prof.lon0)[0]
+    return prof, (prof.lat0, prof.lon0, float(lat2), float(lon2))
+
+
 def name_from_file(path: str) -> str:
     """'Virginia Intl Raceway Full' from an APEX Pro export name (any of its
     three naming styles, see racecore.ingest)."""
     name = Path(path).name
+    if Path(path).suffix.lower() == ".vbo":       # its [session data] name
+        try:
+            with open(path, "r", encoding="latin-1") as f:
+                head = f.read(4000)
+            sm = re.search(r"\[session data\]\s*\n\s*name[ \t]+([^\r\n]+)", head, re.IGNORECASE)
+            if sm and sm.group(1).strip():
+                return sm.group(1).strip()
+        except OSError:
+            pass
     m = (re.search(r"[\s_]from[\s_]+(.+?)[\s_]+on[\s_]+\d", name)
          or re.match(r"^(.+?)__\d{5,}\.csv$", name, re.IGNORECASE))
     if not m:

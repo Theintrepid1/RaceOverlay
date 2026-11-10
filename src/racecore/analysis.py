@@ -153,8 +153,12 @@ class Analysis:
         if not s.has_gps:
             raise ValueError("this file has no GPS position, which lap comparison needs")
         if self.sessions and not self._same_track(s):
-            raise ValueError("this file is from a different track (start line "
-                             f"more than {SAME_TRACK_M:.0f} m away)")
+            # same track with laps counted from another line (a VBO with an
+            # event's timing line, a beacon somewhere else)? count them from
+            # the first file's line instead
+            if not self._recut(s):
+                raise ValueError("this file is from a different track (start line "
+                                 f"more than {SAME_TRACK_M:.0f} m away)")
         self.sessions.append(s)
         self.build()
         return s
@@ -162,6 +166,34 @@ class Analysis:
     def remove(self, i: int):
         del self.sessions[i]
         self.build()
+
+    def _recut(self, s: Session) -> bool:
+        """Count s's laps from the first session's start/finish line, when
+        s's path runs over it. True if that worked."""
+        from .telemetry import gate_crossings
+        from .tracks import gate_at
+        first = self.sessions[0]
+        lap0 = next(l for l in first.laps.laps if l.timed)
+        flat, flon = first.tel.channels["gps_lat"], first.tel.channels["gps_lon"]
+        gate = gate_at(s.tel.channels["gps_lat"], s.tel.channels["gps_lon"],
+                       float(_fill(flat)[lap0.i0 - 1 if lap0.i0 else 0]),
+                       float(_fill(flon)[lap0.i0 - 1 if lap0.i0 else 0]))
+        if gate is None:
+            return False
+        lap = np.zeros(len(s.tel.time))
+        for e in gate_crossings(s.tel.channels["gps_lat"], s.tel.channels["gps_lon"], gate):
+            lap[e:] += 1
+        old = s.tel.channels.get("lap")
+        s.tel.channels["lap"] = lap
+        lm = LapModel(s.tel)
+        if not lm.ok or not any(l.timed for l in lm.laps) or not self._same_track(
+                Session(s.path, s.tel, lm, s.name, s.video)):
+            if old is not None:
+                s.tel.channels["lap"] = old
+            return False
+        s.laps = lm
+        s.tel.meta["lap_line"] = f"re-counted from {first.name}'s start/finish line"
+        return True
 
     def _start_xy(self, s: Session) -> np.ndarray:
         lat = _fill(s.tel.channels["gps_lat"])

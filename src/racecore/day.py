@@ -98,12 +98,30 @@ def _video_creation(path: str) -> dt.datetime | None:
         return None
 
 
-def find_start(video: tuple[list[str], float] | None, lat: float, lon: float
-               ) -> tuple[str, str, str] | None:
+def log_start_utc(tel) -> dt.datetime | None:
+    """When the data file starts, from its own GPS clock: VBO files carry
+    the UTC time of day on every row and the UTC date on their first line."""
+    meta = getattr(tel, "meta", None) or {}
+    day, secs = meta.get("created"), meta.get("utc_start_s")
+    if not day or secs is None:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(day).replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+    return d + dt.timedelta(seconds=float(secs) % 86400)
+
+
+def find_start(video: tuple[list[str], float] | None, lat: float, lon: float,
+               tel=None) -> tuple[str, str, str] | None:
     """(local "YYYY-MM-DD HH:MM", source, UTC ISO or "") for when the data
-    file starts, from the synced video; None if there's no video or it
-    doesn't know the time.
+    file starts: from the file's own GPS clock (VBO), else the synced
+    video; None if neither knows the time.
     `offset` maps data time to video time: video_t = data_t - offset."""
+    start_utc = log_start_utc(tel) if tel is not None else None
+    if start_utc is not None:
+        local = start_utc.astimezone(_local_tz(lon)).replace(tzinfo=None)
+        return local.strftime("%Y-%m-%d %H:%M"), "gps", start_utc.isoformat()
     if not video:
         return None
     parts, off = video

@@ -724,7 +724,12 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                                               f"{Path(path).name}\n\n{e}")
             return str(e)
         if len(self.a.sessions) == 1 and self.a.origin:
-            self.a.use_profile(self._track_for(*self.a.origin))
+            prof = self._track_for(*self.a.origin)
+            if prof is None:   # laps counted from another line (VBO event timing)
+                ch = self.a.sessions[0].tel.channels
+                found = tracks.start_on_path(ch["gps_lat"], ch["gps_lon"])
+                prof = found[0] if found else None
+            self.a.use_profile(prof)
         if self.focus is None or self.lap(self.focus) is None:
             self._default_selection()
         if refresh:
@@ -800,7 +805,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
 
     def add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",
-                      "Telemetry (*.csv *.CSV *.txt APEX*);;All files (*)")
+                      "Telemetry (*.csv *.CSV *.vbo *.VBO *.txt APEX*);;All files (*)")
         if p:
             self.add_session(p)
 

@@ -2174,7 +2174,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _choose_csv(self):
         p = pick_file(self, "Open telemetry CSV", "csv",
-                      "Telemetry (*.csv *.CSV *.txt APEX*);;All files (*)")
+                      "Telemetry (*.csv *.CSV *.vbo *.VBO *.txt APEX*);;All files (*)")
         if p:
             self.open_csv(p)
 
