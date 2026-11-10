@@ -5,7 +5,7 @@ Two desktop apps for track days, for Linux and Windows:
 - **Race Overlay** burns telemetry gauges onto your onboard video.
 - **Race Analysis** is the one to keep open at the track. It compares laps and sessions, shows where you gained or lost time, and plays the matching video.
 
-They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox VBO files (Racelogic VBOX, RaceChrono, Harry's) and most other CSV exports, with GoPro video (And more if you send me your data and videos.)
+They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox, VBO files (Racelogic VBOX, RaceChrono) and most other CSV exports, with GoPro video (And more if you send me your data and videos.)
 
 ## Install
 
