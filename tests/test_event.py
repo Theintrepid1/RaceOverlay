@@ -116,12 +116,17 @@ def test_copies_are_skipped():
         (tmp / "Exports").mkdir()
         shutil.copy(APEX, tmp / "a.csv")
         shutil.copy(APEX, tmp / "Exports" / "a.csv")
-        shutil.copy(tmp / "Saturday Scored 1" / "GH010001.MP4", tmp / "copy.MP4")
+        (tmp / "2016-01-14").mkdir()          # an old import's date folder
+        shutil.copy(tmp / "Saturday Scored 1" / "GH010001.MP4",
+                    tmp / "2016-01-14" / "GH010001.MP4")
         from racecore import telemetry
         sc = event.scan(str(tmp), load=lambda p: tels[p] if p in tels else telemetry.load(p))
         assert sum(Path(d.path).name == "a.csv" for d in sc.data) == 1
         whys = {why for _p, why in sc.skipped}
         assert "a copy of another data file" in whys and "a copy of another video" in whys
+        # the copy in the named session folder is the one kept
+        kept = [v.parts[0] for v in sc.videos if v.name == "GH010001.MP4"]
+        assert not any("2016-01-14" in k for k in kept)
 
 
 def test_unmatched_clip_left_out():

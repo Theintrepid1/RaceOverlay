@@ -122,6 +122,10 @@ def scan(folder: str, progress=None, cancelled=None, load=None) -> Scan:
                 video_paths.append(p)
             elif _is_data_name(p):
                 data_paths.append(p)
+    # of two copies keep the one in a named folder ("Sunday Scored 1") over
+    # one in an import's date folder ("2016-01-14"): the name is the session's
+    dated = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    video_paths.sort(key=lambda p: (any(dated.match(x) for x in p.parts[:-1]), str(p)))
     seen = set()
     for p in data_paths:
         if cancelled and cancelled():
