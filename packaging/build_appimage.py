@@ -233,7 +233,13 @@ def main():
         "Comment=Sync racing telemetry to video and render gauge overlays\n"
         "Exec=raceoverlay %f\nIcon=raceoverlay\nTerminal=false\n"
         "Categories=AudioVideo;Video;\nMimeType=video/mp4;video/quicktime;\n"
-        "StartupWMClass=raceoverlay\n")
+        "StartupWMClass=raceoverlay\nActions=analysis;\n\n"
+        # An AppImage carries one menu entry; app managers (Shelly...) keep
+        # this action and point it at their copy, so Race Analysis is a
+        # right-click away from the first install. The app adds a separate
+        # Race Analysis entry itself on its first start (menuentry.py).
+        "[Desktop Action analysis]\nName=Race Analysis\n"
+        "Exec=raceoverlay --analysis %F\nIcon=raceanalysis\n")
     shutil.copy2(src / "icon.svg", appdir / "raceoverlay.svg")
     (appdir / ".DirIcon").symlink_to("raceoverlay.svg")
     lic = appdir / "usr" / "share" / "licenses" / "raceoverlay"

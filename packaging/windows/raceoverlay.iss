@@ -54,3 +54,13 @@ Name: "{autodesktop}\Race Analysis"; Filename: "{app}\RaceOverlay.exe"; Paramete
 [Run]
 Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; Description: "Start Race Analysis"; Flags: nowait postinstall skipifsilent unchecked
 Filename: "{app}\RaceOverlay.exe"; Description: "Start Race Overlay"; Flags: nowait postinstall skipifsilent
+; In-app updates run this installer silently with /RELAUNCH=overlay or
+; /RELAUNCH=analysis, and the app that asked comes back when it's done.
+Filename: "{app}\RaceOverlay.exe"; Flags: nowait; Check: Relaunch('overlay')
+Filename: "{app}\RaceOverlay.exe"; Parameters: "--analysis"; Flags: nowait; Check: Relaunch('analysis')
+
+[Code]
+function Relaunch(Which: String): Boolean;
+begin
+  Result := WizardSilent() and (CompareText(ExpandConstant('{param:RELAUNCH|}'), Which) = 0);
+end;
