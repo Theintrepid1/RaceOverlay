@@ -27,4 +27,4 @@ def test_build_script_label(tmp_path, monkeypatch):
     monkeypatch.setattr(buildlabel, "_git", lambda *a: "abc1234" if "--short" in a else "vbo")
     assert buildlabel.label() == "vbo · abc1234"           # any other branch
     f, text = buildlabel.write(tmp_path, "PR 9")
-    assert f.read_text().strip() == "PR 9 · abc1234" == text
+    assert f.read_text(encoding="utf-8").strip() == "PR 9 · abc1234" == text
