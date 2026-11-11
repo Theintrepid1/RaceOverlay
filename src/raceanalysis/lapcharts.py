@@ -58,6 +58,11 @@ def choices(w) -> list[Choice]:
         for c in e.channels:
             unit = f" ({c.unit})" if c.unit else ""
             out.append(Choice("col:" + c.col, c.label, c.label + unit))
+    from racecore import mathch          # your own channels, for files that have their inputs
+    for m in mathch.library():
+        if m.on and any(s.tel.has(m.key) for s in a.sessions):
+            unit = f" ({m.unit})" if m.unit else ""
+            out.append(Choice(m.key, f"ƒ {m.name}", m.name + unit))
     return out
 
 
@@ -65,6 +70,8 @@ def label_of(key: str) -> str:
     """A name for a key even when it isn't in the loaded files."""
     if key in BUILTIN:
         return BUILTIN[key]
+    if key.startswith("math:"):
+        return key[5:]
     col = key[4:] if key.startswith("col:") else key
     return re.sub(r"\s*\(.*\)\s*$", "", col).strip() or col
 
@@ -86,6 +93,8 @@ def values(w, key: str, ld) -> np.ndarray | None:
     if key == "grip":
         u = a.grip_on_grid(ld)
         return None if u is None else u * 100
+    if key.startswith("math:"):
+        return math_on_grid(a, ld, key)
     e = getattr(w, "engine", None)
     if e is None:
         return None
@@ -94,6 +103,25 @@ def values(w, key: str, ld) -> np.ndarray | None:
     if key.startswith("col:"):
         return e.on_grid(ld, key[4:])
     return None
+
+
+def math_on_grid(a, ld, key: str) -> np.ndarray | None:
+    """A math channel for lap ld on the analysis grid."""
+    tel = a.sessions[ld.session].tel
+    v = tel.series(key)
+    if v is None or ld.d is None:
+        return None
+    i0 = ld.lap.i0
+    x = v[i0:min(i0 + len(ld.t), len(v))]
+    d = ld.d[:len(x)] + np.arange(len(x)) * 1e-6
+    ok = np.isfinite(x)
+    if ok.sum() < 2:
+        return None
+    out = np.interp(a.grid, d[ok], x[ok])
+    # keep gaps (an if(..., nan) channel) as gaps rather than drawing across them
+    idx = np.clip(np.searchsorted(d, a.grid), 0, len(x) - 1)
+    out[~ok[idx]] = np.nan
+    return out
 
 
 def y_range(key: str) -> tuple[float, float] | None:
