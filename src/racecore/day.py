@@ -57,6 +57,7 @@ class Notes:
     changes: str = ""            # setup / driving changes before this session
     text: str = ""               # anything else
     title: str = ""              # session name, e.g. from its folder ("Sunday Scored 1")
+    use: str = "in"              # "in", "out" (left out of the day-wide numbers), "hidden"
     weather: dict = field(default_factory=dict)   # filled by fetch: air_c, humidity, ...
 
     @staticmethod
@@ -281,6 +282,7 @@ class Verdict:
     text: str
     short: str = ""          # one line for the step-by-step story
     kind: str = ""           # "all" | "some" | "uneven" | "flat"
+    moved: list = field(default_factory=list)   # (turn, change in g) that stood out, biggest first
 
 
 def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, s1: int,
@@ -299,6 +301,8 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
     same = float(np.mean(np.sign(d) == np.sign(shift))) if abs(shift) > 1e-9 else 0.0
     resid = d - shift
     outliers = [n for n, r in zip(which, resid) if abs(r) >= big]
+    moved = sorted(((n, float(r)) for n, r in zip(which, d) if n in outliers),
+                   key=lambda x: -abs(x[1]))
     word = "more" if shift > 0 else "less"
     if abs(shift) >= min_shift and same >= 0.75:
         kind = "all"
@@ -311,8 +315,6 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
         text = (f"Most turns stayed about the same ({shift:+.2f} g), but "
                 f"{', '.join(outliers)} changed a lot. Changes in a few turns usually come "
                 "from driving (line, braking, commitment) there.")
-        moved = sorted(((n, r) for n, r in zip(which, d) if n in outliers),
-                       key=lambda x: -abs(x[1]))
         txt = ", ".join(f"{n} {r:+.2f}" for n, r in moved[:3])
         if len(moved) > 3:
             txt += f" and {len(moved) - 3} more"
@@ -326,7 +328,7 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
         kind = "flat"
         text = f"Little change ({shift:+.2f} g across turns)."
         short = f"little change ({shift:+.2f} g)"
-    return Verdict(shift, same, outliers, text, short, kind)
+    return Verdict(shift, same, outliers, text, short, kind, moved)
 
 
 @dataclass
@@ -339,40 +341,55 @@ class Step:
     changes: str                   # what the driver noted before session `to`
 
 
-def steps(n: int, mode: str = "consecutive", base: int = 0) -> list[tuple[int, int]]:
+def steps(n: int, mode: str = "consecutive", base: int = 0,
+          counts: list[bool] | None = None) -> list[tuple[int, int]]:
     """Which pairs to compare: each session against the one before it
-    ("consecutive") or every other session against one ("baseline")."""
-    if n < 2:
+    ("consecutive") or every other session against one ("baseline").
+    Sessions left out (counts[i] False) are skipped: step by step goes from
+    the last session that counts to the next."""
+    idx = [i for i in range(n) if counts is None or counts[i]]
+    if len(idx) < 2:
         return []
     if mode == "baseline":
         base = min(max(0, base), n - 1)
-        return [(base, i) for i in range(n) if i != base]
-    return [(i - 1, i) for i in range(1, n)]
+        if base not in idx:
+            return []
+        return [(base, i) for i in idx if i != base]
+    return list(zip(idx, idx[1:]))
 
 
 def story(names: list[str], rows: list[list[float | None]], bests: list[float | None],
-          changes: list[str], mode: str = "consecutive", base: int = 0) -> list[Step]:
+          changes: list[str], mode: str = "consecutive", base: int = 0,
+          counts: list[bool] | None = None) -> list[Step]:
     """The day as a chain of comparisons. names are the turns, rows[turn] the
     grip used per session, bests each session's best lap, changes each
     session's "Changes" note."""
     out = []
-    for a, b in steps(len(bests), mode, base):
+    for a, b in steps(len(bests), mode, base, counts):
         v = compare_sessions(names, rows, a, b)
         bc = bests[b] - bests[a] if bests[a] is not None and bests[b] is not None else None
         out.append(Step(a, b, v, bc, (changes[b] or "").strip()))
     return out
 
 
-def cell_change(rows: list[list[float | None]], r: int, si: int, mode: str = "consecutive",
-                base: int = 0) -> float | None:
-    """Change in turn r's grip used for session si against what it's being
-    compared with (the session before, or the baseline). None for the
-    first/baseline session or a missing value."""
+def compared_with(si: int, mode: str = "consecutive", base: int = 0,
+                  counts: list[bool] | None = None) -> int | None:
+    """The session si is compared with, or None (first, baseline, left out)."""
+    ok = (lambda i: counts is None or counts[i])
+    if not ok(si):
+        return None
     if mode == "baseline":
-        other = base
-    else:
-        other = si - 1
-    if other < 0 or other == si:
+        return base if base != si and ok(base) else None
+    return next((i for i in range(si - 1, -1, -1) if ok(i)), None)
+
+
+def cell_change(rows: list[list[float | None]], r: int, si: int, mode: str = "consecutive",
+                base: int = 0, counts: list[bool] | None = None) -> float | None:
+    """Change in turn r's grip used for session si against what it's being
+    compared with (the session before that counts, or the baseline). None
+    for the first/baseline session, one left out, or a missing value."""
+    other = compared_with(si, mode, base, counts)
+    if other is None:
         return None
     a, b = rows[r][other], rows[r][si]
     return None if a is None or b is None else b - a

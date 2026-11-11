@@ -237,7 +237,7 @@ class OverviewPage(QtWidgets.QWidget):
     # ------------------------------------------------------------- parts
     def _cards(self):
         w, a = self.win, self.win.a
-        timed = a.timed_laps()
+        timed = a.counted_laps()          # sessions left out don't count
         best = a.ref
         fastest = min(timed, key=lambda ld: ld.time)
         self.c_best.set(fmt_lap(fastest.time), w.label(fastest), PURPLE)
@@ -249,8 +249,10 @@ class OverviewPage(QtWidgets.QWidget):
         g = a.lap_grip(best)
         self.c_grip.set(f"{g:.0%}" if g is not None else "–",
                         f"{w.label(best)} (reference)" if g is not None else "no g data")
-        n_s = len(a.sessions)
-        self.c_laps.set(f"{len(timed)}", f"timed, {n_s} session{'s' if n_s != 1 else ''}")
+        n_s = sum(a.counts(si) for si in range(len(a.sessions))) or len(a.sessions)
+        out = len(a.sessions) - n_s
+        self.c_laps.set(f"{len(timed)}", f"timed, {n_s} session{'s' if n_s != 1 else ''}"
+                        + (f" ({out} left out)" if out else ""))
 
     def _chart(self):
         """Lap times as a line per session (slow laps left out of the line),
@@ -262,7 +264,7 @@ class OverviewPage(QtWidgets.QWidget):
         if not timed:
             self.chart.getAxis("bottom").setTicks([[]])
             return
-        fastest = min(ld.time for ld in timed)
+        fastest = min(ld.time for ld in a.counted_laps())
         slowest = max(ld.time for ld in timed)
         ticks = []
         x = 0.0
@@ -279,8 +281,9 @@ class OverviewPage(QtWidgets.QWidget):
                     ys.append(ld.time)
                     self._bars.append((x, ld.key))
                 x += 1.0
-            if xs:
-                self.chart.plot(xs, ys, pen=pg.mkPen("#6b6a64", width=2))
+            if xs:     # a session left out of the day's numbers: dotted
+                self.chart.plot(xs, ys, pen=pg.mkPen("#6b6a64", width=2) if a.counts(si)
+                                else pg.mkPen("#6b6a64", width=1.5, style=QtCore.Qt.DotLine))
             x += 0.6
         # dots on top: fastest purple, reference grey, picked laps in their colours
         labels = []

@@ -88,6 +88,7 @@ def test_story_consecutive_and_baseline():
     assert st[0].verdict.kind == "all" and st[0].changes == "dropped 2 psi"
     assert abs(st[0].best_change + 0.8) < 1e-9
     assert st[1].verdict.kind == "some" and st[1].verdict.short.startswith("T3 +0.12,")
+    assert st[1].verdict.moved[0][0] == "T3" and abs(st[1].verdict.moved[0][1] - 0.12) < 1e-9
     assert st[2].verdict.kind == "flat" and st[2].best_change is None
     bl = day.story(names, rows, bests, notes, mode="baseline", base=0)
     assert [(x.frm, x.to) for x in bl] == [(0, 1), (0, 2), (0, 3)]
@@ -129,3 +130,53 @@ def test_session_envelope():
     assert 0.9 < e1["corner"] < 1.05 and 0.9 < e1["brake"] < 1.05
     assert abs(e2["mean"] / e1["mean"] - 1.15) < 0.03
     assert day.session_envelope(NS(laps=[]), 0) is None
+
+
+def test_left_out_and_hidden_sessions(tmp_path):
+    """A wet (or any) session left out keeps its laps but doesn't set the
+    reference, grip limit or theoretical best; hidden takes it out entirely."""
+    a = analysis.Analysis()
+    slow = [(1, 8.0), (2, 8.0)]
+    a.add(_session(slow, noise=0.3), "s1.csv", name="dry 1")
+    tel = _session([(None, 0), (None, 0)], noise=0.3, seed=1)   # the quickest one
+    a.add(tel, "s2.csv", name="odd one")
+    a.add(_session(slow, noise=0.3, seed=2), "s3.csv", name="dry 2")
+    assert a.ref.session == 1
+    n_laps = len(a.laps)
+    a.set_use(1, "out")
+    assert not a.counts(1) and a.counts(0) and a.counts(2)
+    assert a.ref.session != 1 and len(a.laps) == n_laps        # laps still there
+    assert all(ld.session != 1 for ld in a.counted_laps())
+    assert all(ld.session != 1 for _t, ld in a.best_sectors())
+    # everything left out: still works, from all laps
+    a.set_use(0, "out")
+    a.set_use(2, "out")
+    assert len(a.counted_laps()) == len(a.timed_laps())
+    for i in (0, 1, 2):
+        a.set_use(i, "in")
+    # hidden: gone from every list, back in its place when unhidden
+    s = a.hide(0)
+    assert [x.name for x in a.sessions] == ["odd one", "dry 2"] and a.hidden == [s]
+    assert {ld.session for ld in a.laps} == {0, 1}
+    a.unhide(s)
+    assert [x.name for x in a.sessions] == ["dry 1", "odd one", "dry 2"] and not a.hidden
+    # saved with the notes
+    csv = tmp_path / "s.csv"
+    csv.write_text("x")
+    day.Notes(use="out").save(str(csv))
+    assert day.Notes.load(str(csv)).use == "out"
+
+
+def test_story_skips_left_out_sessions():
+    names = ["T1", "T2", "T3", "T4"]
+    rows = [[1.0, 0.7, 1.05, 1.1] for _ in names]      # session 1 was wet
+    counts = [True, False, True, True]
+    st = day.story(names, rows, [140.0, 150.0, 139.5, 139.0], ["", "", "", ""],
+                   counts=counts)
+    assert [(x.frm, x.to) for x in st] == [(0, 2), (2, 3)]
+    assert abs(st[0].best_change + 0.5) < 1e-9 and st[0].verdict.kind == "all"
+    assert day.cell_change(rows, 0, 1, counts=counts) is None
+    assert abs(day.cell_change(rows, 0, 2, counts=counts) - 0.05) < 1e-9
+    assert day.compared_with(2, counts=counts) == 0
+    assert day.steps(4, "baseline", 1, counts) == []            # baseline left out
+    assert day.steps(4, "baseline", 0, counts) == [(0, 2), (0, 3)]
