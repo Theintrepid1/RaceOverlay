@@ -180,6 +180,9 @@ class OverlayContext:
     def _src_unit(self, src: str) -> str:
         if src.startswith("col:"):
             return self.telem.units.get(src[4:], "")
+        if src.startswith("math:"):
+            from racecore import mathch
+            return mathch.unit(src)
         return {"speed": "MPH" if self.use_mph else "KM/H", "throttle": "%",
                 "brake": "%", "rpm": "RPM", "lat_g": "g", "lon_g": "g",
                 "lap": ""}.get(src, "")

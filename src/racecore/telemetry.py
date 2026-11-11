@@ -93,9 +93,13 @@ class Telemetry:
         return float(self.time[-1] - self.time[0]) if len(self.time) else 0.0
 
     def series(self, key: str) -> np.ndarray | None:
-        """Role name ("speed") or column ("col:OilTemp")."""
+        """Role name ("speed"), column ("col:OilTemp") or math channel
+        ("math:Brake/throttle overlap", see racecore.mathch)."""
         if key.startswith("col:"):
             return self.raw.get(key[4:])
+        if key.startswith("math:"):
+            from . import mathch
+            return mathch.series(self, key)
         return self.channels.get(key)
 
     def has(self, key: str) -> bool:
@@ -117,14 +121,19 @@ class Telemetry:
         cells (GPS at 10Hz in a 50Hz file) don't make gauges blink out.
         Clamps to the first/last value outside the recorded span.
         """
-        clean = self._clean.get(key)
+        ck = key
+        if key.startswith("math:"):        # stale once the library changes
+            from . import mathch
+            mathch.library()
+            ck = (key, mathch._generation[0])
+        clean = self._clean.get(ck)
         if clean is None:
             vals = self.series(key)
             if vals is None:
                 return float("nan")
             ok = np.isfinite(vals)
             clean = (self.time[ok], vals[ok])
-            self._clean[key] = clean
+            self._clean[ck] = clean
         tt, vv = clean
         if tt.size == 0:
             return float("nan")
@@ -661,6 +670,10 @@ def align_g(tel: Telemetry, angle: float | None = None, flip: bool = False):
     for name in ("lat_g", "lon_g"):
         tel.mapping.pop(name, None)  # derived from ax/ay, not a named column
         tel._clean.pop(name, None)
+    # math channels may use the g: work them out again
+    tel.__dict__.pop("_math_cache", None)
+    for k in [k for k in tel._clean if isinstance(k, tuple)]:
+        tel._clean.pop(k, None)
     tel.g_source = "raw"
     tel.g_align = info
 

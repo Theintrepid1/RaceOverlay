@@ -415,7 +415,8 @@ def box_label(layout: dict, name: str) -> str:
         return g.get("label") or "Logo"
     if g["type"] in LIVE_TYPES or g["type"] == "pip":
         return g.get("label") or GAUGE_TYPES[g["type"]]
-    return g.get("label") or g.get("src", "").replace("col:", "") or name
+    src = g.get("src", "")
+    return g.get("label") or src.split(":", 1)[-1] or name      # col:, math:
 
 
 # ------------------------------------------------------------------ frame ---

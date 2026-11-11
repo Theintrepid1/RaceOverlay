@@ -107,6 +107,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self.act_hand = m.addAction("Sync this session's video by hand…", self.sync_by_hand)
         self.act_remove = m.addAction("Remove this session", self.remove_session)
         m.addSeparator()
+        m.addAction("Math channels…", self.edit_math)
+        m.addSeparator()
         m.addAction("Close", self.close, "Ctrl+W")
         m = mb.addMenu("&Track")
         self.act_turns = m.addAction("Track turns…", self.edit_turns, "Ctrl+T")
@@ -933,6 +935,13 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             self._default_selection()
         self._video_session = None
         self.refresh()
+
+    def edit_math(self):
+        """Your own channels, made from the file's (shared with Race Overlay)."""
+        from raceoverlay.mathgui import MathDialog
+        dlg = MathDialog(self, [s.tel for s in self.a.sessions])
+        if dlg.exec():
+            self.refresh()
 
     def edit_turns(self):
         """Track → Track turns: open the Track tab."""

@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from racecore import update
-from racecore import gosync, osutil, telemetry  # noqa: E402
+from racecore import gosync, mathch, osutil, telemetry  # noqa: E402
 
 from . import pip as pipmod
 from . import cards as cardmod
@@ -70,6 +70,7 @@ import tempfile  # noqa: E402
 import threading  # noqa: E402
 
 from . import engine, media  # noqa: E402
+from . import mathgui  # noqa: E402
 from .render import OverlayContext, draw_overlay  # noqa: E402
 
 
@@ -504,6 +505,8 @@ def _tab_page() -> tuple[QtWidgets.QScrollArea, QtWidgets.QVBoxLayout]:
 def src_label(tel, src: str) -> str:
     if src.startswith("col:"):
         return src[4:]
+    if src.startswith("math:"):
+        return mathch.label(src)
     return telemetry.ROLE_LABELS.get(src, src)
 
 
@@ -562,28 +565,15 @@ class GaugeDialog(QtWidgets.QDialog):
 
         self.src_cb = QtWidgets.QComboBox()
         self.src_cb.setMaxVisibleItems(25)
-        model = self.src_cb.model()
-        for r in ("speed", "throttle", "brake", "rpm", "lap", "lat_g", "lon_g"):
-            col = self.tel.mapping.get(r)
-            text = telemetry.ROLE_LABELS[r] + (f"  (from {col})" if col else "")
-            self.src_cb.addItem(text, r)
-            if not self.tel.has(r):
-                model.item(self.src_cb.count() - 1).setEnabled(False)
-        self.src_cb.insertSeparator(self.src_cb.count())
-        for c in self.tel.source_columns:
-            u = self.tel.units.get(c, "")
-            live = self.tel.has("col:" + c)
-            self.src_cb.addItem(c + (f"  [{u}]" if u else "")
-                                + ("" if live else "  (constant)"), "col:" + c)
-            if not live:
-                model.item(self.src_cb.count() - 1).setEnabled(False)
-        i = self.src_cb.findData(self.g["src"])
-        if i < 0:  # gauge from another file: keep its source selectable
-            self.src_cb.addItem(f"{src_label(self.tel, self.g['src'])}  (not in this file)",
-                                self.g["src"])
-            i = self.src_cb.count() - 1
-        self.src_cb.setCurrentIndex(i)
-        form.addRow("Channel", self.src_cb)
+        self._fill_src(self.g["src"])
+        srow = QtWidgets.QHBoxLayout()
+        srow.addWidget(self.src_cb, 1)
+        b_math = QtWidgets.QPushButton("Math channels…")
+        b_math.setToolTip("Make your own channels from the file's (overlap, power, "
+                          "corner radius…)")
+        b_math.clicked.connect(self._edit_math)
+        srow.addWidget(b_math)
+        form.addRow("Channel", srow)
 
         self.label_ed = QtWidgets.QLineEdit(self.g.get("label", ""))
         self.label_ed.setPlaceholderText("e.g. OIL")
@@ -693,8 +683,44 @@ class GaugeDialog(QtWidgets.QDialog):
         self._row_visible(self.color_row, t in ("bar", "dial"))
         self._update_preview()
 
+    def _fill_src(self, want: str):
+        cb = self.src_cb
+        cb.blockSignals(True)
+        cb.clear()
+        model = cb.model()
+        for r in ("speed", "throttle", "brake", "rpm", "lap", "lat_g", "lon_g"):
+            col = self.tel.mapping.get(r)
+            text = telemetry.ROLE_LABELS[r] + (f"  (from {col})" if col else "")
+            cb.addItem(text, r)
+            if not self.tel.has(r):
+                model.item(cb.count() - 1).setEnabled(False)
+        cb.insertSeparator(cb.count())
+        for c in self.tel.source_columns:
+            u = self.tel.units.get(c, "")
+            live = self.tel.has("col:" + c)
+            cb.addItem(c + (f"  [{u}]" if u else "") + ("" if live else "  (constant)"),
+                       "col:" + c)
+            if not live:
+                model.item(cb.count() - 1).setEnabled(False)
+        mathgui.add_math_items(cb, self.tel)
+        i = cb.findData(want)
+        if i < 0 and want:  # gauge from another file: keep its source selectable
+            cb.addItem(f"{src_label(self.tel, want)}  (not in this file)", want)
+            i = cb.count() - 1
+        cb.setCurrentIndex(max(0, i))
+        cb.blockSignals(False)
+
+    def _edit_math(self):
+        cur = self.src_cb.currentData() or ""
+        dlg = mathgui.MathDialog(self, [self.tel], mathch.label(cur))
+        if dlg.exec():
+            self._fill_src(cur)
+            self._src_changed()
+
     def _src_unit(self) -> str:
         src = self.src_cb.currentData() or ""
+        if src.startswith("math:"):
+            return mathch.unit(src)
         return self.tel.units.get(src[4:], "") if src.startswith("col:") else \
             {"speed": "km/h"}.get(src, "")
 
@@ -802,6 +828,7 @@ def channel_combo(tel, current: str, allow_none: bool = False,
                        "col:" + c)
             if not live:
                 model.item(cb.count() - 1).setEnabled(False)
+        mathgui.add_math_items(cb, tel)
     i = cb.findData(current)
     if i < 0 and current:
         cb.addItem(f"{src_label(tel, current) if tel else current}  (not in this file)",
