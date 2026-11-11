@@ -233,3 +233,68 @@ def test_choose_video_and_sync_by_hand():
         assert m.span == (123.4, 423.4)
         items = event.apply([s])
         assert items == [(s.data.path, ["/x/phone.mp4"], 123.4)]
+
+
+def test_second_open_reuses_what_was_worked_out():
+    """Opening the folder again doesn't read any video's sensors, keeps the
+    choices made in the review, and only syncs videos added since."""
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        tels, accel = _event(tmp)
+        reads = []
+
+        def read(v):
+            reads.append(v.parts[0])
+            return accel[v.parts[0]]
+        sessions = event.match(_scan(tmp, tels, accel), read=read)
+        sc = _scan(tmp, tels, accel)
+        reads.clear()
+        sessions = event.match(sc, read=read)
+        assert len(reads) == 4                          # no cache yet: all four
+        s0, s1 = sessions
+        phone = tmp / "Saturday Scored 1" / "phone.mp4"
+        phone.write_bytes(b"phone")
+        event.set_video(s0, event.manual_clip(s0, [str(phone)], 150.0, 60.0))
+        s0.title = "Sat race"
+        s1.second = None                                # rear camera not wanted
+        s1.use = False
+        event.apply(sessions)
+        event.save_cache(str(tmp), sc, sessions)
+
+        cache = event.load_cache(str(tmp))
+        reads.clear()
+        sc2 = _scan_cached(tmp, tels, accel, cache)
+        again = event.match(sc2, read=read, cache=cache)
+        assert reads == [] and sc2.reused == 4
+        assert event.restore(again, cache, str(tmp)) == 2
+        a0, a1 = again
+        assert a0.main.video.parts == [str(phone)] and a0.main.offset == 150.0
+        assert a0.main.video.note == "synced by hand" and a0.title == "Sat race"
+        assert a0.second is not None                    # still there
+        assert a1.second is None and not a1.use
+        assert {c.video.name for c in a0.extra} == {"GH010001.MP4"}
+
+        # "Open" straight away
+        items = event.saved_items(str(tmp))
+        assert items == [(str(tmp / "Saturday Scored 1" / "session1.csv"), [str(phone)], 150.0)]
+
+        # a video added later is the only one synced
+        late = tmp / "Sunday Scored 2" / "GH010009.MP4"
+        late.write_bytes(b"added later")
+        accel[str(late)] = _clip(tels[s1.data.path], 600.0, 200, yaw_deg=10.0, seed=61)
+        reads.clear()
+        sc3 = _scan_cached(tmp, tels, accel, cache)
+        event.match(sc3, read=read, cache=cache)
+        assert reads == [str(late)]
+
+
+def _scan_cached(tmp, tels, accel, cache):
+    def load(p):
+        if p in tels:
+            return tels[p]
+        raise ValueError("not data")
+    sc = event.scan(str(tmp), load=load, cache=cache)
+    for v in sc.videos:
+        if v.fp not in cache.get("videos", {}):
+            v.has_sensors = v.parts[0] in accel
+    return sc

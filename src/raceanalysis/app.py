@@ -835,11 +835,32 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         s.setValue("analysis/event", d)
         s.setValue("analysis/day", d)
+        from racecore import event
+        items = event.saved_items(d)
+        if items:                   # opened before: no need to work it all out again
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Open event folder")
+            box.setText(f"This folder was opened before ({len(items)} session(s)).")
+            box.setInformativeText(
+                "Open opens those sessions straight away. Review shows the matches again "
+                "and checks for files added since; only new videos get synced, and your "
+                "choices are kept.")
+            b_open = box.addButton("Open", QtWidgets.QMessageBox.AcceptRole)
+            b_review = box.addButton("Review…", QtWidgets.QMessageBox.ActionRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.setDefaultButton(b_open)
+            box.exec()
+            if box.clickedButton() is b_open:
+                n = self.add_many(items)
+                self.status(f"Opened {n} session(s).")
+                return
+            if box.clickedButton() is not b_review:
+                return
         dlg = EventDialog(self, d)
         if dlg.exec() and dlg.result:
             n = self.add_many(dlg.result)
-            self.status(f"Opened {n} session(s). Next time, Open track day opens "
-                        "this folder straight away.")
+            self.status(f"Opened {n} session(s). Next time this folder opens straight "
+                        "away.")
 
     def add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",

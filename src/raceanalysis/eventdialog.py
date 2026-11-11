@@ -33,6 +33,7 @@ class EventDialog(QtWidgets.QDialog):
         self.folder = folder
         self.setWindowTitle(f"Open event — {Path(folder).name}")
         self.sc = None
+        self.restored = 0
         self.sessions: list[event.Session] = []
         self.result = None
         self._cancel = False
@@ -107,10 +108,12 @@ class EventDialog(QtWidgets.QDialog):
 
     def _work(self):
         try:
+            cache = event.load_cache(self.folder)     # what's known from last time
             sc = event.scan(self.folder, progress=self.bridge.progress.emit,
-                            cancelled=lambda: self._cancel)
+                            cancelled=lambda: self._cancel, cache=cache)
             sessions = event.match(sc, progress=self.bridge.progress.emit,
-                                   cancelled=lambda: self._cancel)
+                                   cancelled=lambda: self._cancel, cache=cache)
+            self.restored = event.restore(sessions, cache, self.folder)
             self.bridge.done.emit(sc, sessions, None)
         except Exception as e:  # noqa: BLE001 - shown in the dialog
             self.bridge.done.emit(None, None, e)
@@ -147,6 +150,12 @@ class EventDialog(QtWidgets.QDialog):
         if seconds:
             text += (f", {seconds} with a second camera (it ran at the same time; "
                      "check which one should be the main video)")
+        if self.sc is not None and self.sc.reused:
+            new = sum(1 for v in self.sc.videos if v.has_sensors) - self.sc.reused
+            text += (f". {self.sc.reused} video(s) as worked out last time"
+                     + (f", {new} new one(s) synced" if new > 0 else ""))
+        if self.restored:
+            text += "; your choices from last time are kept"
         self.status.setText(text + ". Untick anything you don't want, then Open. "
                             "Double-click a name to change it.")
 
@@ -361,6 +370,8 @@ class EventDialog(QtWidgets.QDialog):
 
     def _open(self):
         self.result = event.apply(self.sessions)
+        if self.sc is not None:
+            event.save_cache(self.folder, self.sc, self.sessions)
         self.accept()
 
     def _close(self):

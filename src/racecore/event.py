@@ -25,6 +25,13 @@ two "facing" groups that way, and names decide which group is the front
 ("front", "rear", "back"...), else a guess the user can swap for the whole
 event at once. A second camera can also be added to a session by hand
 (add_second).
+
+What was worked out is kept in the event folder (.raceanalysis/event.json):
+each video's sync result, keyed by a fingerprint of the file, and the
+choices made in the review (videos picked or lined up by hand, second
+cameras, names, sessions left unticked). Opening the folder again can open
+straight from that (saved_items), and a re-check only reads the sensors of
+videos it hasn't seen, so adding a session's files later is quick.
 """
 from __future__ import annotations
 
@@ -44,6 +51,7 @@ REAR_WORDS = re.compile(r"(?i)(^|[^a-z])(rear|back|behind|driver|cockpit|in-?car
 class DataFile:
     path: str
     tel: object = None
+    fp: str = ""                    # fingerprint (see _fingerprint)
 
 
 @dataclass
@@ -51,6 +59,7 @@ class Video:
     parts: list                     # chapter files, in order
     has_sensors: bool = False
     note: str = ""
+    fp: str = ""
 
     @property
     def name(self) -> str:
@@ -90,6 +99,8 @@ class Scan:
     data: list = field(default_factory=list)
     videos: list = field(default_factory=list)
     skipped: list = field(default_factory=list)   # (path, why)
+    results: dict = field(default_factory=dict)   # video fp -> what match() found (cache)
+    reused: int = 0                               # videos whose sync came from the cache
 
 
 def _fingerprint(path: str) -> str:
@@ -114,9 +125,12 @@ def _is_data_name(p: Path) -> bool:
     return p.suffix.lower() in DATA_EXT or ingest.is_apex_name(p.name)
 
 
-def scan(folder: str, progress=None, cancelled=None, load=None) -> Scan:
+def scan(folder: str, progress=None, cancelled=None, load=None,
+         cache: dict | None = None) -> Scan:
     """Find the data files and videos under folder. progress(text) is
-    called as it goes; load(path) -> Telemetry can be swapped for tests."""
+    called as it goes; load(path) -> Telemetry can be swapped for tests.
+    cache (load_cache) skips checking videos already seen."""
+    known = (cache or {}).get("videos", {})
     from . import telemetry
     from raceoverlay import media
     load = load or telemetry.load
@@ -155,7 +169,7 @@ def scan(folder: str, progress=None, cancelled=None, load=None) -> Scan:
             out.skipped.append((str(p), "no g data to sync cameras to"))
             continue
         seen.add(fp)
-        out.data.append(DataFile(str(p), tel))
+        out.data.append(DataFile(str(p), tel, fp))
     grouped = set()
     for p in video_paths:
         if str(p) in grouped:
@@ -171,12 +185,15 @@ def scan(folder: str, progress=None, cancelled=None, load=None) -> Scan:
             return out
         if progress:
             progress(f"Checking {p.name}")
-        v = Video(parts)
-        try:   # just whether there's a GoPro sensor track (quick); read it later
-            from . import gpmf
-            v.has_sensors = gpmf._gpmd_stream_index(parts[0]) is not None
-        except Exception:  # noqa: BLE001
-            v.has_sensors = False
+        v = Video(parts, fp=fp)
+        if fp in known:
+            v.has_sensors = bool(known[fp].get("has_sensors"))
+        else:
+            try:   # just whether there's a GoPro sensor track (quick); read it later
+                from . import gpmf
+                v.has_sensors = gpmf._gpmd_stream_index(parts[0]) is not None
+            except Exception:  # noqa: BLE001
+                v.has_sensors = False
         if not v.has_sensors:
             v.note = ("no GoPro sensor track: an export or edit (re-encoding drops it), "
                       "or a phone video")
@@ -191,12 +208,35 @@ def _parts_with_starts(parts: list) -> list:
     return [(x.path, x.start) for x in info.parts]
 
 
-def match(sc: Scan, progress=None, cancelled=None, read=None) -> list[Session]:
+def match(sc: Scan, progress=None, cancelled=None, read=None,
+          cache: dict | None = None) -> list[Session]:
     """Sync every GoPro recording to the data file it fits and build the
-    sessions. read(video) -> (times, (N,3) accel) can be swapped for tests."""
+    sessions. read(video) -> (times, (N,3) accel) can be swapped for tests.
+    cache (load_cache): a video synced before is taken from it as long as
+    its data file is still here; one that matched nothing is only tried
+    again when there's a data file it wasn't tried against."""
     from . import gosync
+    known = (cache or {}).get("videos", {})
+    by_fp = {d.fp: d for d in sc.data if d.fp}
     clips = []
-    todo = [v for v in sc.videos if v.has_sensors]
+    todo = []
+    for v in sc.videos:
+        if not v.has_sensors:
+            sc.results[v.fp] = {"has_sensors": False}
+            continue
+        k = known.get(v.fp)
+        m = (k or {}).get("match")
+        if m and m.get("data") in by_fp:
+            clips.append(Clip(v, by_fp[m["data"]], float(m["offset"]), float(m["score"]),
+                              tuple(m["forward"]), float(m.get("duration", 0.0))))
+            sc.results[v.fp] = k
+            sc.reused += 1
+        elif k and "match" in k and m is None and set(by_fp) <= set(k.get("tried", [])):
+            v.note = "didn't match any data file"
+            sc.results[v.fp] = k
+            sc.reused += 1
+        else:
+            todo.append(v)
     for i, v in enumerate(todo):
         if cancelled and cancelled():
             break
@@ -216,14 +256,20 @@ def match(sc: Scan, progress=None, cancelled=None, read=None) -> list[Session]:
                 continue
             if best is None or (res.confident, res.score) > (best[1].confident, best[1].score):
                 best = (d, res)
+        tried = sorted(by_fp)
         if best is None or not best[1].confident:
             v.note = "didn't match any data file"
+            sc.results[v.fp] = {"has_sensors": True, "match": None, "tried": tried}
             continue
         d, res = best
         _car, info = gosync.to_car_frame(t, h, d.tel, res.offset)
         fwd = gosync.car_forward(a, info)
-        clips.append(Clip(v, d, res.offset, res.score, tuple(float(x) for x in fwd),
-                          float(t[-1] - t[0]) if len(t) > 1 else 0.0))
+        c = Clip(v, d, res.offset, res.score, tuple(float(x) for x in fwd),
+                 float(t[-1] - t[0]) if len(t) > 1 else 0.0)
+        clips.append(c)
+        sc.results[v.fp] = {"has_sensors": True, "tried": tried, "match": {
+            "data": d.fp, "offset": c.offset, "score": c.score, "forward": list(c.forward),
+            "duration": c.duration}}
     _facings(clips)
     return sessions_from(sc, clips)
 
@@ -417,3 +463,137 @@ def facing_clarity(clips: list[Clip]) -> float:
     return float(min(abs(_dot(c.forward, ref)) for c in clips))
 
 
+
+
+# ---------------------------------------------------------------- saved state
+CACHE = Path(".raceanalysis") / "event.json"
+
+
+def cache_path(folder: str) -> Path:
+    return Path(folder) / CACHE
+
+
+def load_cache(folder: str) -> dict:
+    """What was saved last time this event folder was opened ({} if never)."""
+    import json
+    try:
+        d = json.loads(cache_path(folder).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) and d.get("version") == 1 else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _rel(folder: str, p: str) -> str:
+    """Paths inside the event folder are saved relative to it, so the folder
+    can move (or be opened from another computer over the network)."""
+    try:
+        return Path(p).resolve().relative_to(Path(folder).resolve()).as_posix()
+    except ValueError:
+        return str(Path(p).resolve())
+
+
+def _abs(folder: str, p: str) -> str:
+    q = Path(p)
+    return str(q if q.is_absolute() else Path(folder) / q)
+
+
+def _clip_ref(folder: str, c: Clip | None):
+    if c is None:
+        return None
+    return {"parts": [_rel(folder, p) for p in c.video.parts], "fp": c.video.fp,
+            "offset": c.offset, "score": c.score, "forward": list(c.forward),
+            "duration": c.duration, "by_hand": c.video.note == "synced by hand"}
+
+
+def save_cache(folder: str, sc: Scan, sessions: list[Session]):
+    """Keep the sync results and the review's choices for next time."""
+    import json
+    old = load_cache(folder)
+    videos = dict(old.get("videos", {}))
+    videos.update({k: v for k, v in sc.results.items() if k})
+    saved = dict(old.get("sessions", {}))
+    for s in sessions:
+        saved[s.data.fp or _rel(folder, s.data.path)] = {
+            "data": _rel(folder, s.data.path), "title": s.title, "use": s.use,
+            "main": _clip_ref(folder, s.main), "second": _clip_ref(folder, s.second)}
+    p = cache_path(folder)
+    try:
+        p.parent.mkdir(exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"version": 1, "videos": videos, "sessions": saved},
+                                  indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass                     # a read-only folder: it just won't be quick next time
+
+
+def _same(c: Clip, ref: dict, folder: str) -> bool:
+    if ref.get("fp") and c.video.fp:
+        return c.video.fp == ref["fp"]
+    return [str(Path(p).resolve()) for p in c.video.parts] == \
+        [str(Path(_abs(folder, p)).resolve()) for p in ref["parts"]]
+
+
+def _take(s: Session, ref: dict | None, folder: str) -> Clip | None:
+    """The clip ref describes: the one already in s (taken out of where it
+    was), else rebuilt from what was saved if its files are still there."""
+    if ref is None:
+        return None
+    for c in [s.main, s.second] + list(s.extra):
+        if c is not None and _same(c, ref, folder):
+            if c is s.main:
+                s.main = None
+            elif c is s.second:
+                s.second = None
+            else:
+                s.extra.remove(c)
+            c.offset = float(ref["offset"])        # lined up again by hand, say
+            return c
+    parts = [_abs(folder, p) for p in ref["parts"]]
+    if not all(os.path.exists(p) for p in parts):
+        return None
+    v = Video(parts, not ref.get("by_hand"), "synced by hand" if ref.get("by_hand") else "",
+              ref.get("fp", ""))
+    return Clip(v, s.data, float(ref["offset"]), float(ref.get("score", 0.0)),
+                tuple(ref.get("forward", (0.0, 0.0, 0.0))), float(ref.get("duration", 0.0)))
+
+
+def restore(sessions: list[Session], cache: dict, folder: str) -> int:
+    """Put back the choices made last time (videos picked or synced by hand,
+    second cameras added or removed, names, unticked sessions). Returns how
+    many sessions had saved choices."""
+    saved = cache.get("sessions", {})
+    n = 0
+    for s in sessions:
+        k = saved.get(s.data.fp) or saved.get(_rel(folder, s.data.path))
+        if not k:
+            continue
+        n += 1
+        s.use = bool(k.get("use", True))
+        s.title = k.get("title") or s.title
+        main = _take(s, k.get("main"), folder) if k.get("main") else None
+        second = _take(s, k.get("second"), folder) if k.get("second") else None
+        # what the automatic match picked but wasn't chosen goes to extra
+        s.extra = [c for c in (s.main, s.second) if c is not None] + s.extra
+        s.main, s.second = main, second
+        if s.main is None and s.extra:      # its video is gone, or it never had one
+            s.main = s.extra.pop(0)
+    return n
+
+
+def saved_items(folder: str) -> list[tuple[str, list, float]]:
+    """What the last open of this event folder opened, if every file is
+    still there: (data file, video parts, offset), like apply()."""
+    out = []
+    for k in load_cache(folder).get("sessions", {}).values():
+        if not k.get("use", True):
+            continue
+        data = _abs(folder, k["data"])
+        if not os.path.exists(data):
+            continue
+        m = k.get("main")
+        parts = [_abs(folder, p) for p in m["parts"]] if m else []
+        if parts and not all(os.path.exists(p) for p in parts):
+            parts = []
+        out.append((data, parts, float(m["offset"]) if m and parts else 0.0))
+    return out
