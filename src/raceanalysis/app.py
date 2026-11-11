@@ -26,6 +26,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from racecore import analysis, engine, gosync, ingest, osutil, telemetry, tracks
+from raceoverlay import titled  # noqa: E402
 from raceoverlay import media
 from raceoverlay.syncgui import force_qt_platform_for_native, pick_file, settings
 
@@ -46,7 +47,7 @@ class PopOut(QtWidgets.QWidget):
     def __init__(self, page, title):
         super().__init__(None, QtCore.Qt.Window)
         self.page = page
-        self.setWindowTitle(f"{title} – Race Analysis")
+        self.setWindowTitle(titled(f"{title} – Race Analysis", "Race Analysis"))
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
         lay.addWidget(page)
@@ -59,7 +60,7 @@ class PopOut(QtWidgets.QWidget):
 class AnalysisWindow(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Race Analysis")
+        self.setWindowTitle(titled("Race Analysis", "Race Analysis"))
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.a = analysis.Analysis()
         self.engine = engine.EngineData(self.a)

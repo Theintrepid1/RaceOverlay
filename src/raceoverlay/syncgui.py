@@ -1273,6 +1273,10 @@ class MergeDialog(QtWidgets.QDialog):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    def setWindowTitle(self, title: str):  # noqa: N802 - Qt name
+        from . import titled
+        super().setWindowTitle(titled(title, "Race Overlay"))
+
     def __init__(self):
         super().__init__()
         st = settings()
@@ -2016,7 +2020,7 @@ class MainWindow(QtWidgets.QMainWindow):
             pv.addWidget(mbox)
             self._menu_refresh()
 
-        from . import __version__
+        from . import __version__, version_text
         vbox, vl = _group("Preview")
         vl.addWidget(_note("How the preview player decodes video. Doesn't "
                            "affect rendered videos.", small=True))
@@ -2066,7 +2070,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         ubox, ul = _group("Updates")
         urow = QtWidgets.QHBoxLayout()
-        urow.addWidget(_note(f"Version {__version__}"), 1)
+        urow.addWidget(_note(f"Version {version_text()}"), 1)
         urow.addWidget(_btn("Check for updates…", self._check_updates,
                             "Look for a new version on GitHub; install it, or roll back "
                             "to the version you had before"))
@@ -2077,7 +2081,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pv.addWidget(ubox)
 
         abox, al2 = _group("About")
-        al2.addWidget(_note(f"Race Overlay {__version__}<br>"
+        al2.addWidget(_note(f"Race Overlay {version_text()}<br>"
                             "Free software under the GNU GPL v3 or later. "
                             "No warranty.", small=True))
         pv.addWidget(abox)
