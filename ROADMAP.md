@@ -4,7 +4,8 @@
 - CMP official turn names (placed from the track map's distance table)
 - Day tab across several days (F2): decide after using multi-session compare
 - Check against real data: the dash with an APEX OBD dongle log, picture-in-picture
-  with two real GoPro recordings, the import clock fix on a reset-clock card
+  with two real GoPro recordings, the import clock fix on a reset-clock card, the
+  event folder on the VIR 2021 folder over the NAS
 
 ## Next — collecting ideas, not started
 - GoPro GPS positions for laps or sync (needs an outdoor clip with a solid 3D lock)
@@ -13,6 +14,12 @@
 - Code signing (Azure Artifact Signing) once teammates have tried the build
 
 ## Done
+- **v1.5.0** (2026-11-11):
+  - **Updates:** daily check, download and install, one-click roll back; the AppImage adds both apps to the menu.
+  - **Open event folder:** hand-organised folders matched up from the GoPro sensors, a second camera found or added, and remembered for next time.
+  - **Sync by hand** window, from the event review and after import.
+  - **VBO files**, with the file's own start line.
+  - **Day tab:** Sessions / Compare / Grip sub-tabs; sessions In, Left out or Hidden.
 - **v1.4.0** (2026-11-05):
   - **Delta bar** (iRacing-style), **dash cluster** gauge, and **snapping** while
     moving gauges.

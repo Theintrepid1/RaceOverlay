@@ -26,5 +26,9 @@ def test_build_script_label(tmp_path, monkeypatch):
     assert buildlabel.label("PR 7") == "PR 7 · abc1234"
     monkeypatch.setattr(buildlabel, "_git", lambda *a: "abc1234" if "--short" in a else "vbo")
     assert buildlabel.label() == "vbo · abc1234"           # any other branch
+    monkeypatch.setattr(buildlabel, "_git", lambda *a: "abc1234" if "--short" in a
+                        else "release-1.5")
+    assert buildlabel.label() == ""                        # the version-bump branch
+    monkeypatch.setattr(buildlabel, "_git", lambda *a: "abc1234" if "--short" in a else "vbo")
     f, text = buildlabel.write(tmp_path, "PR 9")
     assert f.read_text(encoding="utf-8").strip() == "PR 9 · abc1234" == text

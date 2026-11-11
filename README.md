@@ -11,6 +11,7 @@ They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox, VBO files 
 
 - **Linux:** download `RaceOverlay-<version>-x86_64.AppImage` from Releases, mark it executable, and double-click it. The first launch offers to add both apps to your menu.
 - **Windows:** run `RaceOverlay-<version>-windows-setup.exe` from Releases. It's a per-user install with no admin rights needed. It's unsigned for now, so click "More info → Run anyway".
+- **Updates:** both apps check once a day and can download and install a new version for you. The previous version is kept, so you can roll back in one click.
 
 ## Race Overlay
 
@@ -41,6 +42,8 @@ They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox, VBO files 
 - **GoPro import:**
   - Copies the card into a folder per day and matches each video to its data file.
   - Fixes a camera clock that reset to 2016, using the GoPro's GPS time.
+  - **Open event folder** for folders you organised yourself: every video is matched to its data file from the GoPro's sensors, copies and exports are skipped, and a second camera is found or added. Opening it again is instant.
+  - **Sync by hand** for a phone video or anything the sensors can't sync.
 - **Laps:**
   - Lap times interpolated to the line, sector times, best sectors and the theoretical best.
   - Delta, speed, g and engine charts against distance; you pick which ones.
@@ -51,6 +54,7 @@ They work with APEX Pro, AiM, TrackAddict, Harry's LapTimer, RaceBox, VBO files 
   - Loop the video on any turn.
 - **Day:**
   - Compare any number of sessions, step by step or against a baseline.
+  - Leave a session out of the day's numbers (a wet one) or hide it.
   - It tells you whether a change showed up in every turn (car, tires, track) or only a few (driving).
   - Notes for each session, tire pressures cold and hot, and weather.
 - **Video:** the synced video follows the cursor. A second video can be stacked to compare against the reference lap.

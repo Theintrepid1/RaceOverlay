@@ -1,5 +1,14 @@
 # Changelog
 
+v1.5.0
+- **Updates:** both apps check for a new version once a day and can download and install it for you, on Linux and Windows. If a new version breaks something, roll back to the previous one in one click, no internet needed.
+- **Open event folder:** point Race Analysis at a folder you organised yourself (a folder per session, raw GoPro clips, data files, exports) and it matches every video to its data file from the GoPro's sensors, skipping copies and exports. One camera is the usual case; a second camera running at the same time is found (front and rear told apart) or added by hand. Opening the folder again is instant, and only new files get synced.
+- **Sync by hand:** for a phone video or a GoPro that won't sync, line it up yourself with a live speed/g/lap readout, a speed trace to click and nudges down to one frame. Also from File → "Sync this session's video by hand…".
+- **VBO files** (Racelogic VBOX, RaceChrono), using the start line saved in the file.
+- **Day tab** split into Sessions, Compare and Grip, so it stays usable with lots of sessions. The comparisons are a table now.
+- **Leave a session out** (a wet one) of the day's numbers while keeping its laps and video, or hide it completely.
+- Test builds show their PR number in the title bar.
+
 v1.4.0
 - **Delta bar:** an iRacing-style bar with the gap in the middle, blending red to green. Range, direction and gaining/losing colouring are adjustable. The lap timer drops its own delta while a bar is shown.
 - **Dash cluster:** shift lights, an RPM bar graph, gear (worked out from RPM and speed), four channels of your choice, brake/throttle bars and a footer line. With no RPM it shows speed instead.
