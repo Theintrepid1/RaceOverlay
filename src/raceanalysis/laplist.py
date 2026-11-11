@@ -54,7 +54,8 @@ class LapTree(QtWidgets.QTreeWidget):
                                                     "Purple = best of all laps.")
         for si, s in enumerate(a.sessions):
             vid = "video" if s.video else "no video"
-            top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid})"])
+            out = " · left out of the day's numbers" if s.use == "out" else ""
+            top = QtWidgets.QTreeWidgetItem([f"{s.name}  ({vid}){out}"])
             top.setData(0, QtCore.Qt.UserRole, ("session", si))
             top.setFirstColumnSpanned(True)
             top.setToolTip(0, f"{s.name}\n{s.path}")

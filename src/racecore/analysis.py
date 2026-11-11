@@ -57,6 +57,8 @@ class Session:
     laps: LapModel
     name: str = ""
     video: tuple[list[str], float] | None = None   # (video files, offset)
+    use: str = "in"      # "in", or "out": left out of the day-wide numbers (a wet session)
+    order: int = 0       # order opened, so a hidden session comes back in its place
 
     @property
     def has_gps(self) -> bool:
@@ -120,6 +122,8 @@ class CornerResult:
 class Analysis:
     def __init__(self):
         self.sessions: list[Session] = []
+        self.hidden: list[Session] = []    # loaded but hidden from everything
+        self._opened = 0
         self.laps: list[LapData] = []
         self.ref: LapData | None = None
         self.grid = np.zeros(0)
@@ -159,12 +163,38 @@ class Analysis:
             if not self._recut(s):
                 raise ValueError("this file is from a different track (start line "
                                  f"more than {SAME_TRACK_M:.0f} m away)")
+        self._opened += 1
+        s.order = self._opened
         self.sessions.append(s)
         self.build()
         return s
 
     def remove(self, i: int):
         del self.sessions[i]
+        self.build()
+
+    # ---- leaving sessions out, hiding them
+    def counts(self, si: int) -> bool:
+        """Does session si count towards the day-wide numbers (grip limit,
+        default reference, theoretical best, day comparisons)?"""
+        return 0 <= si < len(self.sessions) and self.sessions[si].use != "out"
+
+    def set_use(self, si: int, use: str):
+        """'in' or 'out' for session si (the reference becomes the best
+        lap that counts)."""
+        self.sessions[si].use = "out" if use == "out" else "in"
+        self.build()
+
+    def hide(self, si: int) -> Session:
+        s = self.sessions.pop(si)
+        self.hidden.append(s)
+        self.build()
+        return s
+
+    def unhide(self, s: Session):
+        self.hidden.remove(s)
+        self.sessions.append(s)
+        self.sessions.sort(key=lambda x: x.order)
         self.build()
 
     def _recut(self, s: Session) -> bool:
@@ -234,8 +264,9 @@ class Analysis:
         timed = [ld for ld in self.laps if ld.timed]
         if not timed:
             return
-        self._build_envelope(timed)
-        self.set_reference(min(timed, key=lambda ld: ld.time))
+        counted = self.counted_laps()
+        self._build_envelope(counted)
+        self.set_reference(min(counted, key=lambda ld: ld.time))
 
     def _build_envelope(self, laps):
         """Grip envelope from every timed lap of every session."""
@@ -395,10 +426,17 @@ class Analysis:
     def timed_laps(self) -> list[LapData]:
         return [ld for ld in self.laps if ld.timed]
 
+    def counted_laps(self) -> list[LapData]:
+        """Timed laps of the sessions that count; all timed laps when every
+        session is left out."""
+        timed = self.timed_laps()
+        return [ld for ld in timed if self.counts(ld.session)] or timed
+
     def best_sectors(self) -> list[tuple[float, LapData]]:
         out = []
+        laps = self.counted_laps()
         for k in range(self.n_sectors):
-            ld = min(self.timed_laps(), key=lambda x: x.sectors[k])
+            ld = min(laps, key=lambda x: x.sectors[k])
             out.append((ld.sectors[k], ld))
         return out
 

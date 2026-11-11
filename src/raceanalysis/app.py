@@ -25,7 +25,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from racecore import analysis, engine, gosync, ingest, osutil, telemetry, tracks
+from racecore import analysis, day, engine, gosync, ingest, osutil, telemetry, tracks
 from raceoverlay import titled  # noqa: E402
 from raceoverlay import media
 from raceoverlay.syncgui import force_qt_platform_for_native, pick_file, settings
@@ -223,7 +223,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         return self.lap(self.focus) if self.focus else None
 
     def label(self, ld) -> str:
-        return ld.label(self.a.sessions)
+        out = "" if self.a.counts(ld.session) or len(self.a.sessions) < 2 else " (left out)"
+        return ld.label(self.a.sessions) + out
 
     def name(self, ld) -> str:
         """'Lap 5 – 2:19.806' (with the session name when there are several)."""
@@ -399,7 +400,10 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if a.ref is None:
             self.info.setText("")
             return
-        names = ", ".join(s.name for s in a.sessions)
+        names = ", ".join(s.name + (" (left out)" if s.use == "out" else "")
+                          for s in a.sessions)
+        if a.hidden:
+            names += f" · {len(a.hidden)} hidden"
         track = a.profile.name if a.profile is not None else ""
         self.info.setText(f"{track + ' · ' if track else ''}{names}")
 
@@ -719,7 +723,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         """Add a data file. Returns None on success, else why it wasn't added
         (also shown in a message unless quiet)."""
         try:
-            if any(Path(s.path).resolve() == Path(path).resolve() for s in self.a.sessions):
+            if any(Path(s.path).resolve() == Path(path).resolve()
+                   for s in self.a.sessions + self.a.hidden):
                 return "already open"
             tel = tel if tel is not None else telemetry.load(path)
             if video is None:
@@ -727,6 +732,11 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 video = analysis.find_video(path, [
                     s.value("import/library", ""), str(Path(path).parent)])
             self.a.add(tel, path, name=session_name(path), video=video)
+            use = day.Notes.load(path).use         # left out or hidden last time
+            if use == "out":
+                self.a.set_use(len(self.a.sessions) - 1, "out")
+            elif use == "hidden":
+                self.a.hide(len(self.a.sessions) - 1)
         except Exception as e:  # noqa: BLE001 - shown to the user
             if not quiet:
                 QtWidgets.QMessageBox.warning(self, "Can't add this file",
@@ -764,7 +774,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
 
     def _default_selection(self):
         """Reference plus the latest timed lap, which the video follows."""
-        timed = self.a.timed_laps()
+        timed = self.a.counted_laps()
         if not timed or self.a.ref is None:
             return
         last = max(timed, key=lambda ld: (ld.session, ld.lap.start))
@@ -852,6 +862,55 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._video_session = None
         if self.a.sessions:
             self._default_selection()
+        self.refresh()
+
+    def set_session_use(self, s: analysis.Session, use: str):
+        """Count a session in the day-wide numbers ("in"), leave it out of
+        them ("out"), or hide it from everything ("hidden"). Saved with the
+        session's notes. The laps you had picked stay picked when they can."""
+        a = self.a
+        for p in self.pages:
+            if getattr(p, "flush", None):
+                p.flush()
+        objs = {id(x): x for x in a.sessions}
+
+        def obj(k):
+            return (a.sessions[k[0]], k[1]) if k is not None and k[0] < len(a.sessions) else None
+        picked = [obj(k) for k in self.compare]
+        focus = obj(self.focus)
+        ref = obj(a.ref.key) if a.ref is not None else None
+        if s in a.hidden:
+            s.use = "out" if use == "out" else "in"
+            if use != "hidden":
+                a.unhide(s)
+        elif id(s) in objs:
+            si = a.sessions.index(s)
+            if use == "hidden":
+                a.hide(si)
+            else:
+                a.set_use(si, use)
+        n = day.Notes.load(s.path)
+        n.use = use if use in ("out", "hidden") else "in"
+        try:
+            n.save(s.path)
+        except OSError as e:
+            self.status(f"Couldn't save that next to {Path(s.path).name}: {e}")
+
+        def key(o):
+            if o is None or o[0] not in a.sessions:
+                return None
+            k = (a.sessions.index(o[0]), o[1])
+            return k if self.lap(k) is not None else None
+        # keep the reference you picked while its session still counts
+        rk = key(ref)
+        if rk is not None and a.counts(rk[0]) and self.lap(rk) is not a.ref:
+            a.set_reference(self.lap(rk))
+        self.compare = [k for k in (key(o) for o in picked)
+                        if k is not None and self.lap(k) is not a.ref]
+        self.focus = key(focus)
+        if self.focus is None and a.sessions:
+            self._default_selection()
+        self._video_session = None
         self.refresh()
 
     def edit_turns(self):
