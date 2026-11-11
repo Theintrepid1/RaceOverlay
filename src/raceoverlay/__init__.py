@@ -3,7 +3,7 @@
 """raceoverlay — burn racing telemetry gauges onto video."""
 from . import gauges, render, demo, media, engine  # noqa: F401
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 def build_label() -> str:
