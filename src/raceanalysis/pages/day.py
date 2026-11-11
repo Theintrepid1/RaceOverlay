@@ -38,8 +38,13 @@ def _short_names(names: list[str]) -> list[str]:
     return names
 
 
+# session colours: the lap colours first, then four more, so a day of up to
+# eight sessions never repeats one (and none looks like the grip limit's teal)
+SESSION_COLORS = SERIES + ["#9b6fe0", "#d6559b", "#8fb339", "#a67c52"]
+
+
 def _scolor(i: int) -> str:
-    return SERIES[i % len(SERIES)]
+    return SESSION_COLORS[i % len(SESSION_COLORS)]
 
 
 class _Worker(QtCore.QObject):
@@ -214,8 +219,11 @@ class DayPage(QtWidgets.QWidget):
         el.setContentsMargins(0, 0, 0, 0)
         el.setSpacing(2)
         el.addWidget(self.env, 1)
-        self.env_legend = _note("", small=True)       # beside the chart, not on it
-        self.env_legend.setWordWrap(True)
+        self.env_legend = QtWidgets.QWidget()          # under the chart, not on it
+        self.env_legend_grid = QtWidgets.QGridLayout(self.env_legend)
+        self.env_legend_grid.setContentsMargins(4, 2, 4, 2)
+        self.env_legend_grid.setHorizontalSpacing(14)
+        self.env_legend_grid.setVerticalSpacing(1)
         el.addWidget(self.env_legend)
         gsplit.addWidget(envbox)
         self.trend = pg.PlotWidget()
@@ -227,7 +235,18 @@ class DayPage(QtWidgets.QWidget):
             self.trend.getAxis(ax).enableAutoSIPrefix(False)
         self.trend.setLabel("left", "g (95th pct)")
         self.trend_labels = pointlabels.PointLabels(self.trend)
-        gsplit.addWidget(self.trend)
+        trendbox = QtWidgets.QWidget()
+        tbl = QtWidgets.QVBoxLayout(trendbox)
+        tbl.setContentsMargins(0, 0, 0, 0)
+        tbl.setSpacing(2)
+        tbl.addWidget(self.trend, 1)
+        trend_note = _note("95th percentile of cornering and braking g on each timed lap. "
+                           "Rising over the first laps = tires warming up; falling later = "
+                           "tires getting hot. Learning a track shows across sessions "
+                           "instead.", small=True)
+        trend_note.setWordWrap(True)
+        tbl.addWidget(trend_note)
+        gsplit.addWidget(trendbox)
         gsplit.setStretchFactor(0, 2)
         gsplit.setStretchFactor(1, 3)
         gsplit.setSizes([560, 840])
@@ -255,7 +274,7 @@ class DayPage(QtWidgets.QWidget):
             self._fill_sessions()           # hidden sessions can still be brought back
             self.turns.setRowCount(0)
             self.env.clear()
-            self.env_legend.setText("")
+            self._set_legend([])
             self.trend.clear()
             self.verdict.setText("Open the day's sessions (File → Open track day…)."
                                  if not a.hidden else
@@ -295,6 +314,23 @@ class DayPage(QtWidgets.QWidget):
         pass
 
     # ------------------------------------------------------------ sessions
+    def _set_legend(self, items: list[str], foot: str = ""):
+        """One entry per cell, two columns, so nothing wraps or gets cut off."""
+        g = self.env_legend_grid
+        while g.count():
+            w = g.takeAt(0).widget()
+            if w is not None:
+                w.hide()              # gone now, not just when Qt gets round to it
+                w.setParent(None)
+                w.deleteLater()
+        for k, html in enumerate(items):
+            lbl = _note(html, small=True)
+            g.addWidget(lbl, k // 2, k % 2)
+        if foot:
+            lbl = _note(foot, small=True)
+            lbl.setWordWrap(True)
+            g.addWidget(lbl, (len(items) + 1) // 2, 0, 1, 2)
+
     # direction name, angle of the envelope (unflipped: +lat right, +lon accel)
     ENV_DIRS = (("Brake", 1.5 * np.pi), ("Accel", 0.5 * np.pi), ("Left", np.pi), ("Right", 0.0))
 
@@ -544,9 +580,9 @@ class DayPage(QtWidgets.QWidget):
             p.plot(kx * o[:, 0], ky * o[:, 1], pen=pen)
             legend.append(f"<span style='color:{self._col(i)}'>■</span> {_esc(a.sessions[i].name)}"
                           + ("" if self.counts[i] else " <i>(left out, dotted)</i>"))
-        legend.append(f"<span style='color:{LIMIT}'>- -</span> the grip limit (sessions that "
-                      "count). Hover the chart for any direction.")
-        self.env_legend.setText(" &nbsp; ".join(legend))
+        legend.append(f"<span style='color:{LIMIT}'>- -</span> grip limit")
+        self._set_legend(legend, "Dashed: the grip limit, from the sessions that count. "
+                                 "Hover the chart for any direction.")
         outl = [e.outline() for i, e in enumerate(self.envs) if e is not None and self.counts[i]]
         if a.envelope is not None:
             outl.append(a.envelope.outline())
@@ -639,9 +675,7 @@ class DayPage(QtWidgets.QWidget):
         self.trend_labels.set(pts)
         p.setTitle("<span style='font-size:9pt'>Lap by lap: cornering g (solid), "
                    "braking g (dashed)</span>")
-        p.setToolTip("95th percentile of cornering and braking g on each timed lap. "
-                     "Rising over the first laps = tires warming up; falling later = "
-                     "tires getting hot. Learning a track shows across sessions instead.")
+        p.setToolTip("")
 
     # ---------------------------------------------------------------- notes
     def _load_form(self):
