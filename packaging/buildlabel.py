@@ -28,8 +28,8 @@ def label(given: str | None = None) -> str:
     sha = _git("rev-parse", "--short", "HEAD")
     if not given:
         branch = _git("rev-parse", "--abbrev-ref", "HEAD")
-        if branch in ("", "HEAD", "main", "master"):
-            return ""
+        if branch in ("", "HEAD", "main", "master") or branch.startswith("release"):
+            return ""                     # a release (release-1.5: the version bump)
         given = branch
     return f"{given} · {sha}" if sha else given
 
