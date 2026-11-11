@@ -282,6 +282,7 @@ class Verdict:
     text: str
     short: str = ""          # one line for the step-by-step story
     kind: str = ""           # "all" | "some" | "uneven" | "flat"
+    moved: list = field(default_factory=list)   # (turn, change in g) that stood out, biggest first
 
 
 def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, s1: int,
@@ -300,6 +301,8 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
     same = float(np.mean(np.sign(d) == np.sign(shift))) if abs(shift) > 1e-9 else 0.0
     resid = d - shift
     outliers = [n for n, r in zip(which, resid) if abs(r) >= big]
+    moved = sorted(((n, float(r)) for n, r in zip(which, d) if n in outliers),
+                   key=lambda x: -abs(x[1]))
     word = "more" if shift > 0 else "less"
     if abs(shift) >= min_shift and same >= 0.75:
         kind = "all"
@@ -312,8 +315,6 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
         text = (f"Most turns stayed about the same ({shift:+.2f} g), but "
                 f"{', '.join(outliers)} changed a lot. Changes in a few turns usually come "
                 "from driving (line, braking, commitment) there.")
-        moved = sorted(((n, r) for n, r in zip(which, d) if n in outliers),
-                       key=lambda x: -abs(x[1]))
         txt = ", ".join(f"{n} {r:+.2f}" for n, r in moved[:3])
         if len(moved) > 3:
             txt += f" and {len(moved) - 3} more"
@@ -327,7 +328,7 @@ def compare_sessions(names: list[str], rows: list[list[float | None]], s0: int, 
         kind = "flat"
         text = f"Little change ({shift:+.2f} g across turns)."
         short = f"little change ({shift:+.2f} g)"
-    return Verdict(shift, same, outliers, text, short, kind)
+    return Verdict(shift, same, outliers, text, short, kind, moved)
 
 
 @dataclass

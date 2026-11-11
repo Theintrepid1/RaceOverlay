@@ -59,6 +59,12 @@ class DayPage(QtWidgets.QWidget):
             "Air", "Track"]
     C_START, C_G, C_TRACK = 3, 6, 11
     USES = (("In", "in"), ("Left out", "out"), ("Hidden", "hidden"))
+    STORY_COLS = ["", "Sessions", "Best lap", "What changed", "More grip", "Less grip",
+                  "You changed"]
+    VERDICT = {"all": ("Every turn", "car, tires, track or temperature"),
+               "some": ("A few turns", "driving"),
+               "uneven": ("Uneven", "no clear cause"),
+               "flat": ("Little change", "")}
 
     def __init__(self, win):
         super().__init__()
@@ -189,15 +195,42 @@ class DayPage(QtWidgets.QWidget):
         self.mode_step.toggled.connect(self._mode_changed)
         self.cmp_base.activated.connect(lambda _i: self._fill_turns())
         tl.addLayout(crow)
-        self.verdict = _note("")
+        vsplit = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        storybox = QtWidgets.QWidget()
+        sbl = QtWidgets.QVBoxLayout(storybox)
+        sbl.setContentsMargins(0, 0, 0, 0)
+        sbl.setSpacing(2)
+        # the day as a chain of comparisons, one row each
+        self.story = QtWidgets.QTableWidget(0, len(self.STORY_COLS))
+        self.story.setHorizontalHeaderLabels(self.STORY_COLS)
+        self.story.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.story.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.story.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.story.verticalHeader().setVisible(False)
+        self.story.setWordWrap(False)
+        for col, tip in ((1, "Which session against which"),
+                         (2, "Change in best lap time: green = faster"),
+                         (3, "What the turn-by-turn grip says changed. Every turn moving "
+                             "together points at the car, tires, track or temperature; a "
+                             "few turns moving points at driving. Hover a row for more."),
+                         (4, "Turns that used noticeably more grip than the rest (g)"),
+                         (5, "Turns that used noticeably less grip than the rest (g)"),
+                         (6, "Your Changes note for the later session (Sessions tab)")):
+            self.story.horizontalHeaderItem(col).setToolTip(tip)
+        sbl.addWidget(self.story, 1)
+        self.verdict = _note("", small=True)
         self.verdict.setWordWrap(True)
-        self.verdict.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        tl.addWidget(self.verdict)
+        sbl.addWidget(self.verdict)
+        vsplit.addWidget(storybox)
         self.turns = QtWidgets.QTableWidget(0, 1)
         self.turns.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.turns.verticalHeader().setVisible(False)
         self.turns.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        tl.addWidget(self.turns, 1)
+        vsplit.addWidget(self.turns)
+        vsplit.setStretchFactor(0, 2)
+        vsplit.setStretchFactor(1, 5)
+        vsplit.setSizes([260, 650])
+        tl.addWidget(vsplit, 1)
         self.sub.addTab(turnbox, "Compare")
 
         # ---- Grip: each session's envelope, and lap by lap
@@ -513,7 +546,7 @@ class DayPage(QtWidgets.QWidget):
                 "used changed (File → Add data file…)." if n < 2 else
                 "Fewer than two sessions count, so there's nothing to compare. Set "
                 "sessions back to In on the Sessions tab.")
-            self.verdict.setToolTip("")
+            self.story.setRowCount(0)
             return
         timed = [[ld.time for ld in a.laps if ld.session == si and ld.timed]
                  for si in range(n)]
@@ -521,33 +554,70 @@ class DayPage(QtWidgets.QWidget):
         story = day.story([c.name for c in corners], rows, bests,
                           [nt.changes for nt in self.notes] + [""] * (n - len(self.notes)),
                           mode, base, counts)
-        html = self.story_html(story, mode)
+        self._fill_story(story, mode)
         out = [a.sessions[i].name for i in range(n) if not counts[i]]
-        if out:
-            html += ("<br><span style='color:%s'>Left out: %s</span>"
-                     % (INK_DIM, _esc(", ".join(out))))
-        self.verdict.setText(html)
-        self.verdict.setToolTip("<br><br>".join(
-            f"<b>{a.sessions[st.to].name} vs {a.sessions[st.frm].name}:</b> {st.verdict.text}"
-            for st in story if st.verdict))
+        self.verdict.setText(f"Left out of the comparison: {_esc(', '.join(out))}"
+                             if out else "")
+        self.verdict.setVisible(bool(out))
 
-    def story_html(self, story, mode: str) -> str:
+    @staticmethod
+    def _turn_list(moved, sign: int, n: int = 4) -> tuple[str, str]:
+        """'T14 +0.19, T8a +0.09' (the biggest few) and the full list for a tooltip."""
+        xs = [(t, g) for t, g in moved if (g > 0) == (sign > 0)]
+        full = ", ".join(f"{t} {g:+.2f}" for t, g in xs)
+        short = ", ".join(f"{t} {g:+.2f}" for t, g in xs[:n])
+        if len(xs) > n:
+            short += f"  +{len(xs) - n} more"
+        return short, full
+
+    def _fill_story(self, story, mode: str):
         a = self.win.a
+        t = self.story
         names = _short_names([s.name for s in a.sessions])
-        lines = []
-        for st in story:
+        t.setRowCount(len(story))
+        bold = QtGui.QFont(t.font())
+        bold.setBold(True)
+        for r, st in enumerate(story):
             na, nb = names[st.frm], names[st.to]
-            head = (f"{na} → {nb}" if mode == "consecutive" else f"{nb} vs {na}")
-            bits = [f"<span style='color:{self._col(st.to)}'>■</span> <b>{_esc(head)}</b>"]
+            cells = [("", None, None), (f"{na} → {nb}" if mode == "consecutive"
+                                        else f"{nb} vs {na}", None, None)]
             if st.best_change is not None:
                 col = GAIN if st.best_change < -0.05 else LOSS if st.best_change > 0.05 \
                     else NEUTRAL
-                bits.append(f"best <span style='color:{col}'>{st.best_change:+.2f} s</span>")
-            bits.append(_esc(st.verdict.short) if st.verdict else "too few turns to compare")
-            if st.changes and mode == "consecutive":
-                bits.append(f"<i>you changed: {_esc(_one_line(st.changes))}</i>")
-            lines.append(" · ".join(bits))
-        return "<br>".join(lines)
+                cells.append((f"{st.best_change:+.2f} s", col, None))
+            else:
+                cells.append(("", None, None))
+            v = st.verdict
+            if v is None:
+                cells += [("too few turns to compare", INK_DIM, None), ("", None, None),
+                          ("", None, None)]
+            else:
+                where, why = self.VERDICT.get(v.kind, ("", ""))
+                if v.kind in ("all", "uneven"):
+                    where += f" {v.shift:+.2f} g"
+                cells.append((where + (f": {why}" if why else ""), None, v.text))
+                for sign, col in ((1, GAIN), (-1, LOSS)):
+                    short, full = self._turn_list(v.moved, sign)
+                    cells.append((short, col, full if full != short else None))
+            ch = st.changes if mode == "consecutive" else ""
+            cells.append((_one_line(ch, 60), INK_DIM, ch if len(ch) > 60 or "\n" in ch
+                          else None))
+            for col, (txt, colour, tip) in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(txt)
+                if col == 0:
+                    it.setBackground(QtGui.QColor(self._col(st.to)))
+                if col == 1:
+                    it.setFont(bold)
+                if col == 2:
+                    it.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                if colour:
+                    it.setForeground(QtGui.QColor(colour))
+                it.setToolTip(tip or (f"{a.sessions[st.to].name} vs {a.sessions[st.frm].name}"
+                                      f": {v.text}" if v else ""))
+                t.setItem(r, col, it)
+        t.resizeColumnsToContents()
+        t.setColumnWidth(0, 8)
+        t.horizontalHeader().setStretchLastSection(True)
 
     # --------------------------------------------------------------- plots
     def _draw_env(self):

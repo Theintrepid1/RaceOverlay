@@ -88,6 +88,7 @@ def test_story_consecutive_and_baseline():
     assert st[0].verdict.kind == "all" and st[0].changes == "dropped 2 psi"
     assert abs(st[0].best_change + 0.8) < 1e-9
     assert st[1].verdict.kind == "some" and st[1].verdict.short.startswith("T3 +0.12,")
+    assert st[1].verdict.moved[0][0] == "T3" and abs(st[1].verdict.moved[0][1] - 0.12) < 1e-9
     assert st[2].verdict.kind == "flat" and st[2].best_change is None
     bl = day.story(names, rows, bests, notes, mode="baseline", base=0)
     assert [(x.frm, x.to) for x in bl] == [(0, 1), (0, 2), (0, 3)]
