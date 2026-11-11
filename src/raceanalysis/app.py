@@ -99,9 +99,11 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         m = mb.addMenu("&File")
         m.addAction("Import from GoPro card…", self.import_card, "Ctrl+I")
         m.addAction("Open track day…", self.open_day, "Ctrl+O")
+        m.addAction("Open event folder…", self.open_event)
         m.addAction("Add data file…", self.add_session_dialog)
         m.addSeparator()
         self.act_find = m.addAction("Find video for this session…", self.find_video)
+        self.act_hand = m.addAction("Sync this session's video by hand…", self.sync_by_hand)
         self.act_remove = m.addAction("Remove this session", self.remove_session)
         m.addSeparator()
         m.addAction("Close", self.close, "Ctrl+W")
@@ -338,7 +340,7 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         self._load_ref_video()
         self.set_cursor(self.cursor_d)
         has = self.a.ref is not None
-        for act in (self.act_find, self.act_remove, self.act_turns):
+        for act in (self.act_find, self.act_hand, self.act_remove, self.act_turns):
             act.setEnabled(has)
 
     def rename_session(self, si: int):
@@ -804,10 +806,29 @@ class AnalysisWindow(QtWidgets.QMainWindow):
         if not found:
             QtWidgets.QMessageBox.information(
                 self, "Nothing synced here",
-                "No synced videos in this folder. Import from the card first, or use "
+                "No synced videos in this folder. Import from the card first, use "
+                "File → Open event folder… for a folder organised by hand, or "
                 "File → Add data file… and Find video for this session….")
             return
         self.add_many(found)
+
+    def open_event(self):
+        """A folder organised by hand (a folder per session, front and rear
+        cameras, data files): match everything up, review, open."""
+        from .eventdialog import EventDialog
+        from .importer import _pick_dir
+        s = settings()
+        d = _pick_dir(self, "Event folder", s.value("analysis/event", "")
+                      or s.value("analysis/day", ""))
+        if not d:
+            return
+        s.setValue("analysis/event", d)
+        s.setValue("analysis/day", d)
+        dlg = EventDialog(self, d)
+        if dlg.exec() and dlg.result:
+            n = self.add_many(dlg.result)
+            self.status(f"Opened {n} session(s). Next time, Open track day opens "
+                        "this folder straight away.")
 
     def add_session_dialog(self):
         p = pick_file(self, "Add a data file", "csv",
@@ -849,7 +870,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
             return
         parts = media.find_chapters(p)
         tel = s.tel
-        job = {"si": si, "parts": parts, "done": False, "res": None, "err": None}
+        job = {"si": si, "parts": parts, "done": False, "res": None, "err": None,
+               "nodata": False}
         self._sync_job = job
         self.status(f"Syncing {Path(p).name} to {s.name} from the camera's sensors…", 0)
 
@@ -860,7 +882,8 @@ class AnalysisWindow(QtWidgets.QMainWindow):
                 job["res"] = res
             except gosync.NoCameraData:
                 job["err"] = ("This video has no GoPro sensor track (merged or re-encoded "
-                              "files lose it). Pick the original GH01xxxx file.")
+                              "files, and other cameras, don't have one).")
+                job["nodata"] = True
             except Exception as e:  # noqa: BLE001
                 job["err"] = str(e)
             job["done"] = True
@@ -869,26 +892,63 @@ class AnalysisWindow(QtWidgets.QMainWindow):
     def _finish_find_video(self):
         job, self._sync_job = self._sync_job, None
         self.statusBar().clearMessage()
+        si, parts = job["si"], job["parts"]
         if job["err"]:
-            QtWidgets.QMessageBox.warning(self, "Couldn't sync", job["err"])
+            r = QtWidgets.QMessageBox.question(
+                self, "Couldn't sync", job["err"] + "\n\nLine it up by hand instead?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.Yes)
+            if r == QtWidgets.QMessageBox.Yes:
+                self._sync_by_hand(si, parts, None)
             return
         res = job["res"]
         if not res.confident:
-            r = QtWidgets.QMessageBox.question(
-                self, "Weak match",
-                f"The best match is weak ({res.score:.0%}, next best {res.runner_up:.0%}). "
-                f"The video may be from another session.\n\nUse it anyway "
-                f"(offset {res.offset:+.2f} s)?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-                QtWidgets.QMessageBox.No)
-            if r != QtWidgets.QMessageBox.Yes:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Weak match")
+            box.setText(f"The best match is weak ({res.score:.0%}, next best "
+                        f"{res.runner_up:.0%}). The video may be from another session.")
+            use = box.addButton(f"Use it (offset {res.offset:+.2f} s)",
+                                QtWidgets.QMessageBox.AcceptRole)
+            hand = box.addButton("Sync by hand…", QtWidgets.QMessageBox.ActionRole)
+            box.addButton(QtWidgets.QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() is hand:
+                self._sync_by_hand(si, parts, res.offset)
                 return
-        s = self.a.sessions[job["si"]]
-        s.video = (job["parts"], res.offset)
-        ingest.save_pairing(job["parts"], s.path, res.offset)
+            if box.clickedButton() is not use:
+                return
+        self._set_video(si, parts, res.offset)
+
+    def _set_video(self, si: int, parts: list[str], offset: float, how: str = ""):
+        s = self.a.sessions[si]
+        s.video = (list(parts), float(offset))
+        ingest.save_pairing(list(parts), s.path, float(offset))
         self._video_session = None
         self.refresh()
-        self.status(f"Video synced to {s.name} (offset {res.offset:+.2f} s).")
+        self.status(f"Video synced to {s.name}{how} (offset {offset:+.2f} s).")
+
+    def _sync_by_hand(self, si: int, parts: list[str], offset: float | None):
+        from .manualsync import ManualSyncDialog
+        s = self.a.sessions[si]
+        self.videop.pause()
+        dlg = ManualSyncDialog(self, s.tel, parts, offset, s.name, self.use_mph)
+        if dlg.exec() and dlg.offset is not None:
+            self._set_video(si, parts, dlg.offset, " by hand")
+
+    def sync_by_hand(self):
+        """File → Sync this session's video by hand…: line up the video it
+        has (or pick one) yourself."""
+        ld = self.focus_lap()
+        if ld is None:
+            return
+        s = self.a.sessions[ld.session]
+        if s.video:
+            self._sync_by_hand(ld.session, s.video[0], s.video[1])
+            return
+        p = pick_file(self, f"Video for {s.name}", "video",
+                      "Video (*.mp4 *.MP4 *.mov *.MOV);;All files (*)")
+        if p:
+            self._sync_by_hand(ld.session, media.find_chapters(p), None)
 
     def closeEvent(self, ev):
         self._page(DayPage).flush()
