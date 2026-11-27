@@ -171,6 +171,9 @@ def _parse_aim(lines: list[str]) -> Parsed:
     while i < len(rows) and rows[i]:
         if len(rows[i]) >= 2:
             meta[rows[i][0].strip()] = rows[i][1].strip()
+            if len(rows[i]) > 2:          # Beacon Markers, Segment Times: one per lap
+                meta[rows[i][0].strip() + " (all)"] = [c.strip() for c in rows[i][1:]
+                                                      if c.strip()]
         i += 1
     while i < len(rows) and not rows[i]:
         i += 1
@@ -533,6 +536,23 @@ def _pick_g(role, cands, raw, units, refs):
     return info
 
 
+def _beacon_laps(meta: dict, time: np.ndarray, t0: float) -> np.ndarray | None:
+    """AiM exports (MyChron and friends) have no lap column: the lap ends
+    are in the header, "Beacon Markers" (seconds, on the file's time).
+    Lap number for each sample: 0 before the first marker (the out-lap),
+    then 1, 2, ..."""
+    vals = meta.get("Beacon Markers (all)") or ([meta["Beacon Markers"]]
+                                                 if meta.get("Beacon Markers") else [])
+    try:
+        marks = np.array(sorted(float(v) for v in vals)) - t0
+    except ValueError:
+        return None
+    marks = marks[(marks > 0) & (marks < (time[-1] if len(time) else 0))]
+    if len(marks) == 0:
+        return None
+    return np.searchsorted(marks, time, side="right").astype(float)
+
+
 def _single_lap(meta: dict) -> tuple[int, float] | None:
     m = re.search(r"lap\s*(\d+)\s*-\s*(\d+):(\d+(?:\.\d+)?)",
                   meta.get("Segment", ""), re.IGNORECASE)
@@ -595,6 +615,7 @@ def load(path: str, overrides: dict[str, str] | None = None,
         time = time / 1000.0
     order = np.argsort(time, kind="stable")
     data, time = data[order], time[order]
+    t0 = float(time[0]) if len(time) else 0.0
     time = time - time[0] if len(time) else time
 
     raw = {h: data[:, j] for j, h in enumerate(header)}
@@ -617,6 +638,11 @@ def load(path: str, overrides: dict[str, str] | None = None,
     sl = _single_lap(p.meta)
     if sl:
         tel.meta["single_lap"] = sl
+    if "lap" not in channels:
+        beacons = _beacon_laps(p.meta, time, t0)
+        if beacons is not None:
+            channels["lap"] = beacons
+            tel.meta["lap_source"] = "AiM beacon markers"
 
     has_raw = "ax" in channels and "ay" in channels
     explicit = {"lat_g", "lon_g"} & {r for r, c in overrides.items() if c}
